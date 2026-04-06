@@ -2,7 +2,8 @@ package everything.optionpricer.util;
 
 
 /**
- *
+ * Assistant for standard Normal Distribution calculations
+ * Will definitely be used with Black Scholes, maybe for future expansions of project
  * @author lorenzobarbagelata
  */
 public final class NormalDistribution {
