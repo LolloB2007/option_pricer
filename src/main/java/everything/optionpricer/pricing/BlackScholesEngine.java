@@ -92,9 +92,7 @@ public class BlackScholesEngine {
             double d2 = (d1 - (volatility*Math.sqrt(option.getTimeToExpiry())));
             
             price = BlackScholesEngine.cost(currentPrice, option.getStrikePrice(), riskFreeRate, option.getTimeToExpiry(), 
-                    d1(currentPrice, option.getStrikePrice(), riskFreeRate, volatility, option.getTimeToExpiry()), 
-                    d2(currentPrice, option.getStrikePrice(), riskFreeRate, volatility, option.getTimeToExpiry()), 
-                    option.getOptionType());
+                    d1, d2, option.getOptionType());
         }
         
         if(type == PUT) {
@@ -102,9 +100,7 @@ public class BlackScholesEngine {
             double d2 = (d1 - (volatility*Math.sqrt(option.getTimeToExpiry())));
             
             price = BlackScholesEngine.cost(currentPrice, option.getStrikePrice(), riskFreeRate, option.getTimeToExpiry(), 
-                    d1(currentPrice, option.getStrikePrice(), riskFreeRate, volatility, option.getTimeToExpiry()), 
-                    d2(currentPrice, option.getStrikePrice(), riskFreeRate, volatility, option.getTimeToExpiry()), 
-                    option.getOptionType());
+                    d1, d2, option.getOptionType());
         }
         
         return new PricingResult(price);

@@ -11,7 +11,7 @@ import static everything.optionpricer.model.OptionType.CALL;
 public class Option {
     
     private final double strikePrice;
-    private final double timeToExpiry;
+    private final double timeToExpiry; //in years
     private final OptionType type;
     
     
