@@ -28,7 +28,7 @@ public class PricingResult {
     }
     
     public String toString() {
-        return "Price(€): " + price;
+        return "Price: " + price;
     }
     
 }
