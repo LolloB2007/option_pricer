@@ -38,7 +38,7 @@ public final class NormalDistribution {
             return 0.0;
         
         double absX = Math.abs(x);
-        double temp = 1.0 / (1.0 + 0.2316419 + absX);
+        double temp = 1.0 / (1.0 + 0.2316419 * absX);
         
         double poly = temp * (0.319381530 +
                 temp * (-0.356563782 +

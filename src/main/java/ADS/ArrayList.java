@@ -22,7 +22,7 @@ public class ArrayList<t> {
      * Don't use for general purpose ArrayList
      */
     public ArrayList(t init) {
-        new ArrayList();
+        this();
         add(init);
     }
     
@@ -117,7 +117,7 @@ public class ArrayList<t> {
      */
     public int find(Object o) {
         for(int i = 0; i<data.length-1; i++) {
-            if(data[i].equals(o)) {
+            if(data[i].equals(o) && data[i]!=null) {
                 return i;
             }
         }
