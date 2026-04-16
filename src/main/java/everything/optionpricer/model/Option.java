@@ -37,6 +37,17 @@ public class Option {
     
     
     /**
+     * Empty constructor needed for text-based user input
+     */
+    public Option()
+    {
+        strikePrice = 0;
+        timeToExpiry = 0;
+        type = null;
+    }
+    
+    
+    /**
      * Creates call option taking strike price and time to expiry in years
      * @param sP
      * @param tE
