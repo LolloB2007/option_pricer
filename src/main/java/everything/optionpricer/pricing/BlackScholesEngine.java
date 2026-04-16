@@ -1,7 +1,7 @@
 package everything.optionpricer.pricing;
 
 import everything.optionpricer.model.OptionType;
-import static everything.optionpricer.model.OptionType.CALL;
+import static everything.optionpricer.model.OptionType.*;
 import everything.optionpricer.util.NormalDistribution;
 
 
@@ -49,6 +49,10 @@ public class BlackScholesEngine {
             return partOne - partTwo;
         }
         
-        return 0.0; //temporarily added
+        if(type == PUT) {
+            return (cost(S, K, r, t, d1, d2, CALL) - S + (K*Math.exp(-r*t)));
+        }
+        
+        return 0.0; //if type is not in Enum, though error should be thrown
     }
 }

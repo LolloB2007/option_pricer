@@ -1,6 +1,6 @@
 package everything.optionpricer.model;
 
-import static everything.optionpricer.model.OptionType.CALL;
+import static everything.optionpricer.model.OptionType.*;
 import everything.optionpricer.pricing.*;
 
 
@@ -46,7 +46,14 @@ public class PricingResult {
             return BlackScholesEngine.cost(currentPrice, option.getStrikePrice(), riskFreeRate, option.getTimeToExpiry(), d1, d2, option.getOptionType());
         }
         
-        return 0.0; //just to prevent IDE error from being annoying
+        if(type == PUT) {
+            double d1 = BlackScholesEngine.d1(currentPrice, option.getStrikePrice(), riskFreeRate, volatility, option.getTimeToExpiry());
+            double d2 = (d1 - (volatility*Math.sqrt(option.getTimeToExpiry())));
+            
+            return BlackScholesEngine.cost(currentPrice, option.getStrikePrice(), riskFreeRate, option.getTimeToExpiry(), d1, d2, option.getOptionType());
+        }
+        
+        return 0.0; //in case optiontype not in enum, even though error should be thrown
     }
     
 }
