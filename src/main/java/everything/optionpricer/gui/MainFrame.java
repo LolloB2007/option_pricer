@@ -32,7 +32,7 @@ public class MainFrame extends JFrame {
         MainPanel = new JPanel(new MigLayout(
                 "fillx, insets 20",
                 "[right]12[grow, fill]",
-                "[]10[]10[]10[]10[]10[]20[]"
+                "[]10[]10[]10[]10[]10[]10[]20[]"
         ));
         
         componentInit();
