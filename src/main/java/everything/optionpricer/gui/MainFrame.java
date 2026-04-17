@@ -1,5 +1,7 @@
 package everything.optionpricer.gui;
 
+import everything.optionpricer.model.*;
+import everything.optionpricer.pricing.BlackScholesEngine;
 import javax.swing.*;
 import net.miginfocom.swing.MigLayout;
 
@@ -54,7 +56,9 @@ public class MainFrame extends JFrame {
         MainPanel.add(timeField, "wrap");
 
         MainPanel.add(priceButton, "span 2, center, wrap");
-        MainPanel.add(resultLabel, "span 2, growx");
+        MainPanel.add(resultLabel, "span 2, growx, alignx center");
+        
+        this.add(MainPanel);
     }
     
     
@@ -134,6 +138,10 @@ public class MainFrame extends JFrame {
     private void priceButtonInit() {
         priceButton = new JButton("Price option");
         priceButton.setVisible(true);
+        
+        priceButton.addActionListener(e -> {
+            onButtonClick();
+        });
     }
     
     
@@ -141,8 +149,35 @@ public class MainFrame extends JFrame {
      * Initialises resultLabel JLabel and sets its visibility to false
      */
     private void resultLabelInit() {
-        resultLabel = new JLabel("");
+        resultLabel = new JLabel("", SwingConstants.CENTER);
         resultLabel.setVisible(false);
+    }
+    
+    
+    /**
+     * Collects data from JTextFields + OptionType, sends to Engine, and displays result
+     */
+    private void onButtonClick() {
+        String optionType = (String) optionTypeCombo.getSelectedItem();
+        
+        double spotPrice = Double.parseDouble(spotField.getText());
+        double strikePrice = Double.parseDouble(strikeField.getText());
+        double rate = Double.parseDouble(rateField.getText());
+        double volatility = Double.parseDouble(volField.getText());
+        double time = Double.parseDouble(timeField.getText());
+        
+        Option current;
+        
+        if(optionType.toUpperCase().equals("CALL")) {
+            current = Option.call(strikePrice, time);
+        } else {
+            current = Option.put(strikePrice, time);
+        }
+        
+        PricingResult price = BlackScholesEngine.price(current, spotPrice, rate, volatility);
+        
+        resultLabel.setText(price.toString());
+        resultLabel.setVisible(true);
     }
     
 }

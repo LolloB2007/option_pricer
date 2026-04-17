@@ -67,7 +67,7 @@ public class Option {
     public static Option put(double sP, double tE) {
         return new Option(sP, tE, OptionType.PUT);
     }
-    
+
     
     /**
      * Getter for strike price

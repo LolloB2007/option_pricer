@@ -28,7 +28,11 @@ public class PricingResult {
     }
     
     public String toString() {
-        return "Price: " + price;
+        
+        int temp = (int) Math.round(price*1000);
+        double temp2 = (double) temp/1000;
+        
+        return "Price: " + temp2;
     }
     
 }
