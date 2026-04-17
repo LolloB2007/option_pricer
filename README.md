@@ -63,7 +63,7 @@ Please enter values using the following conventions:
 
 ### Option 1: Prebuilt JAR
 
-**click here for jar file**
+[**Download the latest release's JAR file**](https://drive.google.com/file/d/1REndptovCK-ZLfrBIOfMd7VRly_QwX_W/view?usp=sharing)
 
 > Requires **Java 17**.
 
