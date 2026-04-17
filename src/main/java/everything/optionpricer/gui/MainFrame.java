@@ -37,6 +37,8 @@ public class MainFrame extends JFrame {
         
         componentInit();
         
+        MainPanel.add(new JLabel("Enter % as decimals (6% = 0.06) and time in years", SwingConstants.CENTER), "span2, growx, alignxcenter, wrap");
+        
         MainPanel.add(new JLabel("Option Type:"));
         MainPanel.add(optionTypeCombo, "wrap");
 
@@ -46,10 +48,10 @@ public class MainFrame extends JFrame {
         MainPanel.add(new JLabel("Strike Price (K):"));
         MainPanel.add(strikeField, "wrap");
 
-        MainPanel.add(new JLabel("Risk-Free Rate (r), decimal form:"));
+        MainPanel.add(new JLabel("Risk-Free Rate (r)"));
         MainPanel.add(rateField, "wrap");
 
-        MainPanel.add(new JLabel("Volatility (σ), decimal form:"));
+        MainPanel.add(new JLabel("Volatility (σ)"));
         MainPanel.add(volField, "wrap");
 
         MainPanel.add(new JLabel("Time to Expiry (T):"));
@@ -158,13 +160,19 @@ public class MainFrame extends JFrame {
      * Collects data from JTextFields + OptionType, sends to Engine, and displays result
      */
     private void onButtonClick() {
+        
+        if(resultLabel.isVisible())
+            resultLabel.setVisible(false);
+        
         String optionType = (String) optionTypeCombo.getSelectedItem();
         
-        double spotPrice = Double.parseDouble(spotField.getText());
-        double strikePrice = Double.parseDouble(strikeField.getText());
-        double rate = Double.parseDouble(rateField.getText());
-        double volatility = Double.parseDouble(volField.getText());
-        double time = Double.parseDouble(timeField.getText());
+        try{
+            double spotPrice = Double.parseDouble(spotField.getText());
+            double strikePrice = Double.parseDouble(strikeField.getText());
+            double rate = Double.parseDouble(rateField.getText());
+            double volatility = Double.parseDouble(volField.getText());
+            double time = Double.parseDouble(timeField.getText());
+         
         
         Option current;
         
@@ -174,10 +182,54 @@ public class MainFrame extends JFrame {
             current = Option.put(strikePrice, time);
         }
         
-        PricingResult price = BlackScholesEngine.price(current, spotPrice, rate, volatility);
+        boolean isValidated = validateInputs(spotPrice, strikePrice, rate, volatility, time);
         
-        resultLabel.setText(price.toString());
-        resultLabel.setVisible(true);
+        if(isValidated) {
+            PricingResult price = BlackScholesEngine.price(current, spotPrice, rate, volatility);
+
+            resultLabel.setText(price.toString());
+            resultLabel.setVisible(true);
+        }
+   
+        else {
+            resultLabel.setText("Please enter valid values in inputs");
+            resultLabel.setVisible(true);
+        }
+        
+        } catch(java.lang.NumberFormatException e) {
+            resultLabel.setText("Please enter valid values in inputs");
+            resultLabel.setVisible(true);
+        }
+    }
+    
+    
+    /**
+     * Validates user inputs based on historical possibilities
+     * @param spot
+     * @param strike
+     * @param rate
+     * @param vol
+     * @param time
+     * @return boolean
+     */
+    private boolean validateInputs(double spot, double strike, double rate, double vol, double time)
+    {
+        if(spot <= 0)
+            return false;
+                    
+        if(strike <= 0)
+            return false;
+        
+        if(rate <= 0 || rate>=1)
+            return false;
+        
+        if(vol <= 0 || vol>=5)
+            return false;
+        
+        if(time <= 0)
+            return false;
+        
+        return true;
     }
     
 }

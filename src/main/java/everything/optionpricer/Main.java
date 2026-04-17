@@ -16,7 +16,7 @@ public class Main {
         
         SwingUtilities.invokeLater( () -> {
             MainFrame main = new MainFrame();
-            main.setSize(400, 350);
+            main.setSize(400, 380);
             main.setLocationRelativeTo(null);
             main.setVisible(true);
         });
