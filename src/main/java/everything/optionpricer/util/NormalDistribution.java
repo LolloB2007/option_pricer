@@ -1,5 +1,7 @@
 package everything.optionpricer.util;
 
+import java.util.Random;
+
 
 /**
  * Assistant for standard Normal Distribution calculations
@@ -10,6 +12,8 @@ public final class NormalDistribution {
     
     private static final double ONE_OVER_SQRT_2PI = 1 / (Math.sqrt(2 * Math.PI));
     private static final double SQRT_2 = Math.sqrt(2);
+    
+    private static final Random DEFAULT_RNG = new Random();
     
     
     /**
@@ -78,6 +82,25 @@ public final class NormalDistribution {
         } else {
             return (-1.0 * cdfInverse(1-p)); //Recursive call for negative case
         }
+    }
+    
+    
+    /**
+     * Returns double based on Gaussian distribution with mu = 0, sigma = 1
+     * @return double
+     */
+    public static double sampleStandardNormal() {
+        return sampleStandardNormal(DEFAULT_RNG);
+    }
+
+    
+    /**
+     * Aids no parameter method
+     * @param rng
+     * @return double
+     */
+    private static double sampleStandardNormal(Random rng) {
+        return rng.nextGaussian();
     }
     
 }
