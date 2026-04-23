@@ -174,12 +174,12 @@ public class MainFrame extends JFrame {
             double time = Double.parseDouble(timeField.getText());
          
         
-        Option current;
+        EuropeanOption current;
         
         if(optionType.toUpperCase().equals("CALL")) {
-            current = Option.call(strikePrice, time);
+            current = EuropeanOption.call(strikePrice, time);
         } else {
-            current = Option.put(strikePrice, time);
+            current = EuropeanOption.put(strikePrice, time);
         }
         
         boolean isValidated = validateInputs(spotPrice, strikePrice, rate, volatility, time);

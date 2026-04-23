@@ -8,7 +8,7 @@ import static everything.optionpricer.model.OptionType.CALL;
  * Holds K, T, and OptionType
  * @author lorenzobarbagelata
  */
-public class Option {
+public abstract class Option {
     
     private final double strikePrice;
     private final double timeToExpiry; //in years
@@ -21,7 +21,7 @@ public class Option {
      * @param tE
      * @param t 
      */
-    private Option(double sP, double tE, OptionType t) {
+    protected Option(double sP, double tE, OptionType t) {
         
         if(sP <= 0)
             throw new IllegalArgumentException("Please enter valid strike price");
@@ -35,39 +35,6 @@ public class Option {
         type = t;
     }
     
-    
-    /**
-     * Empty constructor needed for text-based user input
-     */
-    public Option()
-    {
-        strikePrice = 0;
-        timeToExpiry = 0;
-        type = null;
-    }
-    
-    
-    /**
-     * Creates call option taking strike price and time to expiry in years
-     * @param sP
-     * @param tE
-     * @return Option
-     */
-    public static Option call(double sP, double tE) {
-        return new Option(sP, tE, OptionType.CALL);
-    }
-    
-    
-    /**
-     * Creates put option taking strike price and time to expiry in years
-     * @param sP
-     * @param tE
-     * @return Option
-     */
-    public static Option put(double sP, double tE) {
-        return new Option(sP, tE, OptionType.PUT);
-    }
-
     
     /**
      * Getter for strike price
