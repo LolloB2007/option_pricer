@@ -43,7 +43,7 @@ public class MonteCarloEngine {
         double timeToExpiry = o.getTimeToExpiry();
         
         for(int i = 0; i<sims; i++) {
-            LinkedList paths = simulatePath(o, S, r, v);
+            double[] paths = simulatePath(o, S, r, v);
             
             payoffSum = payoffSum + o.payoff(paths);
         }
@@ -108,23 +108,24 @@ public class MonteCarloEngine {
      * @param v
      * @return LinkedList
      */
-    private static LinkedList simulatePath(PathDependentOption o, double S, double r, double v) {
-        LinkedList path = new LinkedList();
+    private static double[] simulatePath(PathDependentOption o, double S, double r, double v) {
+        
+        int tS = o.getTimeSteps();
+        double[] path = new double[tS];
         
         double ttE = o.getTimeToExpiry();
         
-        int tS = o.getTimeSteps();
         double deltaT = dt(ttE, tS);
         double drift = drift(r, v, deltaT);
         double diff = diffusion(v, deltaT);
         
         double price = S;
-        path.add(price);
+        path[0] = price;
         
-        for(int i = 0; i<tS; i++) {
+        for(int i = 1; i<tS; i++) {
             double z = NormalDistribution.sampleStandardNormal();
             price = price * Math.exp(drift + diff*z);
-            path.add(price);
+            path[i] = price;
         }
         
         return path;

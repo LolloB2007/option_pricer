@@ -1,6 +1,5 @@
 package everything.optionpricer.model;
 
-import everything.optionpricer.util.LinkedList;
 
 /**
  * abstract implementation of path-dependent options
@@ -78,6 +77,6 @@ public abstract class PathDependentOption extends Option {
      * @param path
      * @return double
      */
-    public abstract double payoff(LinkedList<Double> path);
+    public abstract double payoff(double[] path);
     
 }

@@ -1,6 +1,5 @@
 package everything.optionpricer.model;
 
-import everything.optionpricer.util.LinkedList;
 
 /**
  * implementation of asian options
@@ -42,7 +41,7 @@ public class AsianOption extends PathDependentOption {
      * @return double
      */
     @Override
-    public double payoff(LinkedList path) {
+    public double payoff(double[] path) {
         double average;
         
         if(this.arithmeticAverage) {
@@ -65,12 +64,12 @@ public class AsianOption extends PathDependentOption {
      * @param path
      * @return double
      */
-    private double computeArithmeticAverage(LinkedList path) {
-        int length = path.size();
+    private double computeArithmeticAverage(double[] path) {
+        int length = path.length;
         double total = 0.0;
         
         for(int i = 0; i<length; i++) {
-            total += (double) path.get(i);
+            total += path[i];
         }
         
         return (total/length);
@@ -84,12 +83,12 @@ public class AsianOption extends PathDependentOption {
      * @param path
      * @return double
      */
-    private double computeGeometricAverage(LinkedList path) {
-        int length = path.size();
+    private double computeGeometricAverage(double[] path) {
+        int length = path.length;
         double lnSum = 0.0;
         
         for(int i = 0; i<length; i++) {
-            lnSum = Math.log((double) path.get(i));
+            lnSum += Math.log(path[i]);
         }
         
         return (Math.exp(lnSum/length));
