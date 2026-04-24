@@ -2,7 +2,7 @@ package everything.optionpricer.pricing;
 
 import everything.optionpricer.model.*;
 import everything.optionpricer.util.*;
-import java.util.Random;
+
 
 /**
  * Engine for computation using Monte Carlo simulations
@@ -39,14 +39,12 @@ public class MonteCarloEngine {
         
         validateInputs(o, S, r, v);
         
-        Random rng = new Random();
-        
         double payoffSum = 0.0;
         double timeToExpiry = o.getTimeToExpiry();
         int steps = o.getTimeSteps();
         
         for(int i = 0; i<sims; i++) {
-            LinkedList paths = simulatePath(o, S, r, v, sims, rng);
+            LinkedList paths = simulatePath(o, S, r, v, sims);
             
             payoffSum = payoffSum + o.payoff(paths);
         }
@@ -108,12 +106,60 @@ public class MonteCarloEngine {
      * @param rng
      * @return 
      */
-    private static LinkedList simulatePath(PathDependentOption o, double S, double r, double v, int sims, Random rng) {
-        //the magic still needs to be researched
+    private static LinkedList simulatePath(PathDependentOption o, double S, double r, double v, int sims) {
+        LinkedList path = new LinkedList();
+        
+        double ttE = o.getTimeToExpiry();
+        
+        double tS = o.getTimeSteps();
+        double deltaT = dt(ttE, tS);
+        double drift = drift(r, v, deltaT);
+        double diff = diffusion(v, deltaT);
+        
+        double price = S;
+        path.add(price);
+        
+        for(int i = 0; i<sims; i++) {
+            double z = NormalDistribution.sampleStandardNormal();
+            price = price * Math.exp(drift + diff*z);
+            path.add(price);
+        }
+        
+        return path;
     }
 
     
-    
+    /**
+     * Calculates delta time
+     * @param ttE
+     * @param tS
+     * @return double
+     */
+    private static double dt(double ttE, double tS) {
+        return (ttE / tS);
+    }
 
+    
+    /**
+     * Calculates drift correction term
+     * @param r
+     * @param v
+     * @param deltaT
+     * @return double
+     */
+    private static double drift(double r, double v, double deltaT) {
+        return ((r - (0.5 * v * v)) * deltaT);
+    }
+
+    
+    /**
+     * Calculates diffusion term
+     * @param v
+     * @param deltaT
+     * @return double
+     */
+    private static double diffusion(double v, double deltaT) {
+        return (v * Math.sqrt(deltaT));
+    }
     
 }
