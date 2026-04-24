@@ -37,14 +37,13 @@ public class MonteCarloEngine {
      */
     private static PricingResult price(PathDependentOption o, double S, double r, double v, int sims) {
         
-        validateInputs(o, S, r, v);
+        validateInputs(o, S, r, v, sims);
         
         double payoffSum = 0.0;
         double timeToExpiry = o.getTimeToExpiry();
-        int steps = o.getTimeSteps();
         
         for(int i = 0; i<sims; i++) {
-            LinkedList paths = simulatePath(o, S, r, v, sims);
+            LinkedList paths = simulatePath(o, S, r, v);
             
             payoffSum = payoffSum + o.payoff(paths);
         }
@@ -62,8 +61,9 @@ public class MonteCarloEngine {
      * @param S
      * @param r
      * @param v 
+     * @param sims
      */
-    private static void validateInputs(PathDependentOption o, double S, double r, double v) {
+    private static void validateInputs(PathDependentOption o, double S, double r, double v, int sims) {
         
         if (o == null) {
             throw new IllegalArgumentException("Option cannot be null");
@@ -73,12 +73,16 @@ public class MonteCarloEngine {
             throw new IllegalArgumentException("Please enter valid current price");
         }
 
-        if (r >= 1 || r <= 0.0) {
+        if (r >= 1 || r <= -0.2) {
             throw new IllegalArgumentException("Please enter valid risk-free rate");
         }
 
         if (v >= 5.0 || v <= 0.0) {
             throw new IllegalArgumentException("Please enter valid volatility");
+        }
+        
+        if(sims <= 0) {
+            throw new IllegalArgumentException("Please enter valid number of simulations");
         }
 
     }
@@ -102,16 +106,14 @@ public class MonteCarloEngine {
      * @param S
      * @param r
      * @param v
-     * @param sims
-     * @param rng
-     * @return 
+     * @return LinkedList
      */
-    private static LinkedList simulatePath(PathDependentOption o, double S, double r, double v, int sims) {
+    private static LinkedList simulatePath(PathDependentOption o, double S, double r, double v) {
         LinkedList path = new LinkedList();
         
         double ttE = o.getTimeToExpiry();
         
-        double tS = o.getTimeSteps();
+        int tS = o.getTimeSteps();
         double deltaT = dt(ttE, tS);
         double drift = drift(r, v, deltaT);
         double diff = diffusion(v, deltaT);
@@ -119,7 +121,7 @@ public class MonteCarloEngine {
         double price = S;
         path.add(price);
         
-        for(int i = 0; i<sims; i++) {
+        for(int i = 0; i<tS; i++) {
             double z = NormalDistribution.sampleStandardNormal();
             price = price * Math.exp(drift + diff*z);
             path.add(price);
