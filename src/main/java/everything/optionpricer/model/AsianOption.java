@@ -17,7 +17,7 @@ public class AsianOption extends PathDependentOption {
      * @param type --> option type
      * @param tS --> time steps
      * @param dM --> discrete monitoring
-     * @param arithmeticAverage --> 
+     * @param arithmeticAverage
      */
     public AsianOption(double sP, double tE, OptionType type, int tS, boolean dM, boolean arithmeticAverage) {
         super(sP, tE, type, tS, dM);
