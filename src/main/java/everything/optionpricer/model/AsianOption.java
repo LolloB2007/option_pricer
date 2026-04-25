@@ -16,11 +16,10 @@ public class AsianOption extends PathDependentOption {
      * @param tE --> time to expiry
      * @param type --> option type
      * @param tS --> time steps
-     * @param dM --> discrete monitoring
      * @param arithmeticAverage
      */
-    public AsianOption(double sP, double tE, OptionType type, int tS, boolean dM, boolean arithmeticAverage) {
-        super(sP, tE, type, tS, dM);
+    public AsianOption(double sP, double tE, OptionType type, int tS, boolean arithmeticAverage) {
+        super(sP, tE, type, tS, false);
         
         this.arithmeticAverage = arithmeticAverage;
     }
