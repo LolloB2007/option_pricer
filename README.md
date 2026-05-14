@@ -4,7 +4,7 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v2.1**
+**Current release: v2.2**
 
 Highlights since v1.0:
 
@@ -12,9 +12,9 @@ Highlights since v1.0:
 - American options priced by **Longstaff–Schwartz** regression Monte Carlo.
 - Both **discrete** and **continuous** monitoring for the path-dependent types, including Brownian-bridge corrections.
 - **Greeks** (Δ, Γ, ν, Θ, ρ) for every option type — closed-form for European, common-random-numbers finite differences for the others.
-- **Implied volatility** solver (Newton-Raphson with bisection fallback).
+- **Implied volatility** solver for **every** option type — closed-form for European, CRN-based MC / LSM solver for the rest.
 - **Continuous dividend yield + discrete cash dividends** across every pricer.
-- Tabbed UI with a live 5/50/95% percentile chart + a payoff diagram on each tab.
+- Tabbed UI with a live 5/50/95% percentile chart + a payoff diagram on each tab. Launches **maximised by default**.
 - **HTTP/JSON API** so other applications can request prices, Greeks and implied vol over the network.
 
 ## Overview
@@ -40,10 +40,11 @@ The application can be used in two ways:
   - European: closed-form Black–Scholes
   - Path-dependent / American: common-random-numbers (CRN) finite differences against seeded MC / LSM — variance stays in the bump, not the simulation
   - Output in practitioner conventions: vega per 1% σ, theta per day, rho per 1% rate
-- **Implied volatility** solver for European options
-  - Newton-Raphson with vega as the derivative
-  - Bisection fallback for deep ITM/OTM (where vega is too flat)
-  - Pre-flight no-arbitrage bounds check on the target price
+- **Implied volatility** solver for every option type
+  - European: Newton-Raphson with analytic vega + bisection fallback
+  - Path-dependent / American: CRN-seeded pricer so each σ candidate is a deterministic, smooth function of σ (no MC noise across iterations); Newton-Raphson with finite-difference vega; bisection fallback on a pre-checked `[σ_lo, σ_hi]` bracket
+  - Pre-flight no-arbitrage / reachability check on the target price
+  - Caveat: for options whose price is non-monotonic in σ (e.g. up-and-out calls), the solver returns one valid root — there may be a second
 
 ### Dividends
 - **Continuous dividend yield** `q` honoured by every pricer — drift becomes `r − q` in BS, MC and LSM
@@ -62,8 +63,9 @@ The application can be used in two ways:
 
 ### UI
 - Tabbed Swing GUI styled with **FlatLaf** (dark) + custom theme tweaks
+- Launches **maximised** by default
 - **European** tab: Black–Scholes form with closed-form Greeks and an inline implied-vol solver
-- **Monte Carlo** tab: segmented method picker (Asian / Barrier / Lookback / American), card-based form layout, method-specific inputs, async Greeks via SwingWorker
+- **Monte Carlo** tab: segmented method picker (Asian / Barrier / Lookback / American), card-based form layout, method-specific inputs, async Greeks via SwingWorker, async implied-vol solver via SwingWorker
 - **Payoff diagram** on every tab — intrinsic-at-maturity hockey stick + smooth current-value curve, with S₀ guide line and K marker
 - Analytic **5 / 50 / 95% percentile chart** of the option's value over time, with a filled uncertainty band
 - **Hover readout** on the percentile chart — vertical crosshair, dots at the three lines, tooltip with exact values at the cursor's time
@@ -185,9 +187,13 @@ Errors return an HTTP 4xx/5xx status with:
 
 **Implied volatility** — returns `{ "impliedVolatility": <number>, "price": <number> }`:
 
-| Verb | Path |
-|------|------|
-| `POST` | `/implied-vol/european` |
+| Verb | Path | Notes |
+|------|------|-------|
+| `POST` | `/implied-vol/european` | Closed-form (Newton + bisection) |
+| `POST` | `/implied-vol/asian`    | CRN-seeded MC inversion |
+| `POST` | `/implied-vol/barrier`  | CRN-seeded MC inversion |
+| `POST` | `/implied-vol/lookback` | CRN-seeded MC inversion |
+| `POST` | `/implied-vol/american` | CRN-seeded LSM inversion |
 
 ### Request bodies
 
@@ -265,7 +271,7 @@ Both `continuousYield` and `discrete` are independently optional; omit either or
 }
 ```
 
-**Implied volatility (European only)**
+**Implied volatility (European)**
 ```json
 {
   "type": "CALL",
@@ -274,7 +280,18 @@ Both `continuousYield` and `discrete` are independently optional; omit either or
 }
 ```
 
-`simulations` is optional on every Monte Carlo / LSM endpoint; omit it to use the engine default (100 000 for path-dependent, 50 000 for American, 25 000 for American Greeks via LSM). `type` accepts `"CALL"` or `"PUT"` case-insensitively. `dividends` is optional on every endpoint.
+**Implied volatility (Asian / Barrier / Lookback / American)** — same shape as the corresponding `/price/*` request, but with `marketPrice` instead of `volatility`. Example for Asian:
+```json
+{
+  "type": "CALL",
+  "spot": 100, "strike": 100, "rate": 0.05, "timeToExpiry": 1.0,
+  "marketPrice": 5.78,
+  "timeSteps": 252, "discreteMonitoring": true, "arithmeticAverage": true,
+  "simulations": 25000
+}
+```
+
+`simulations` is optional on every Monte Carlo / LSM endpoint; omit it to use the engine default (100 000 for path-dependent pricing, 50 000 for American pricing, 50 000 / 25 000 for path-dependent / American Greeks, 25 000 / 15 000 for path-dependent / American IV). `type` accepts `"CALL"` or `"PUT"` case-insensitively. `dividends` is optional on every endpoint.
 
 ### CORS
 
@@ -306,11 +323,19 @@ curl -s -X POST -H "Content-Type: application/json" \
      http://localhost:8080/greeks/european
 # → {"price":10.45,"greeks":{"delta":0.6368,"gamma":0.0188,"vega":0.3752,"theta":-0.0176,"rho":0.5323}}
 
-# Implied volatility solver
+# Implied volatility (European)
 curl -s -X POST -H "Content-Type: application/json" \
      -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"timeToExpiry":1.0,"marketPrice":10.45}' \
      http://localhost:8080/implied-vol/european
 # → {"impliedVolatility":0.1999847,"price":10.45000}
+
+# Implied volatility (Asian arithmetic call) via CRN-seeded MC inversion
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"timeToExpiry":1.0,
+          "marketPrice":5.78,"timeSteps":252,
+          "discreteMonitoring":true,"arithmeticAverage":true,"simulations":25000}' \
+     http://localhost:8080/implied-vol/asian
+# → {"impliedVolatility":~0.20,"price":~5.78}
 
 # American put (LSM)
 curl -s -X POST -H "Content-Type: application/json" \
@@ -351,8 +376,8 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 ## Current Limitations
 
-- Implied volatility solver is European-only (closed-form basis); MC / LSM IV would require iterating a slow pricer
 - Discrete-dividend handling in BS uses the escrowed model — exact for the standard convention, but not the only valid approach
+- For options non-monotone in σ (most notably up-and-out and down-and-out calls), the IV solver returns one valid root — there can be a second on the same target price
 - No model alternatives beyond Black–Scholes / GBM Monte Carlo (e.g. no Heston, Binomial, PDE)
 - No API authentication — bind to localhost or front with a reverse proxy in any non-trivial deployment
 
