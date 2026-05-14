@@ -9,11 +9,15 @@ import com.sun.net.httpserver.HttpServer;
 import everything.optionpricer.model.AmericanOption;
 import everything.optionpricer.model.AsianOption;
 import everything.optionpricer.model.BarrierOption;
+import everything.optionpricer.model.DividendSchedule;
 import everything.optionpricer.model.EuropeanOption;
 import everything.optionpricer.model.LookbackOption;
 import everything.optionpricer.model.OptionType;
 import everything.optionpricer.model.PricingResult;
 import everything.optionpricer.pricing.BlackScholesEngine;
+import everything.optionpricer.pricing.Greeks;
+import everything.optionpricer.pricing.GreeksCalculator;
+import everything.optionpricer.pricing.ImpliedVolatility;
 import everything.optionpricer.pricing.LongstaffSchwartzEngine;
 import everything.optionpricer.pricing.MonteCarloEngine;
 
@@ -60,35 +64,51 @@ public final class ApiServer {
 
     public record EuropeanRequest(
             String type, double spot, double strike,
-            double rate, double volatility, double timeToExpiry) {}
+            double rate, double volatility, double timeToExpiry,
+            DividendsDto dividends) {}
 
     public record AsianRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
             int timeSteps, boolean discreteMonitoring, boolean arithmeticAverage,
-            Integer simulations) {}
+            Integer simulations, DividendsDto dividends) {}
 
     public record BarrierRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
             int timeSteps, boolean discreteMonitoring,
             double barrier, boolean upBarrier, boolean inBarrier,
-            Integer simulations) {}
+            Integer simulations, DividendsDto dividends) {}
 
     public record LookbackRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
             int timeSteps, boolean discreteMonitoring, boolean fixedStrike,
-            Integer simulations) {}
+            Integer simulations, DividendsDto dividends) {}
 
     public record AmericanRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
-            int exerciseDates, Integer simulations) {}
+            int exerciseDates, Integer simulations, DividendsDto dividends) {}
+
+    public record ImpliedVolRequest(
+            String type, double spot, double strike,
+            double rate, double timeToExpiry, double marketPrice,
+            DividendsDto dividends) {}
+
+    /**
+     * Dividend specification — both fields optional. Continuous yield in
+     * decimal (3% = 0.03). Discrete dividends as a list of {time, amount}.
+     */
+    public record DividendsDto(Double continuousYield, DiscreteDividend[] discrete) {}
+
+    public record DiscreteDividend(double time, double amount) {}
 
     public record PriceResponse(double price)      {}
     public record ErrorResponse(String error)      {}
     public record HealthResponse(String status)    {}
+    public record PriceAndGreeksResponse(double price, Greeks greeks) {}
+    public record ImpliedVolResponse(double impliedVolatility, double price) {}
 
 
     // ===================================================================
@@ -103,12 +123,18 @@ public final class ApiServer {
     public static HttpServer start(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
-        server.createContext("/health",         wrap(ApiServer::health,          false));
-        server.createContext("/price/european", wrap(ApiServer::priceEuropean,   true));
-        server.createContext("/price/asian",    wrap(ApiServer::priceAsian,      true));
-        server.createContext("/price/barrier",  wrap(ApiServer::priceBarrier,    true));
-        server.createContext("/price/lookback", wrap(ApiServer::priceLookback,   true));
-        server.createContext("/price/american", wrap(ApiServer::priceAmerican,   true));
+        server.createContext("/health",          wrap(ApiServer::health,           false));
+        server.createContext("/price/european",  wrap(ApiServer::priceEuropean,    true));
+        server.createContext("/price/asian",     wrap(ApiServer::priceAsian,       true));
+        server.createContext("/price/barrier",   wrap(ApiServer::priceBarrier,     true));
+        server.createContext("/price/lookback",  wrap(ApiServer::priceLookback,    true));
+        server.createContext("/price/american",  wrap(ApiServer::priceAmerican,    true));
+        server.createContext("/greeks/european", wrap(ApiServer::greeksEuropean,   true));
+        server.createContext("/greeks/asian",    wrap(ApiServer::greeksAsian,      true));
+        server.createContext("/greeks/barrier",  wrap(ApiServer::greeksBarrier,    true));
+        server.createContext("/greeks/lookback", wrap(ApiServer::greeksLookback,   true));
+        server.createContext("/greeks/american", wrap(ApiServer::greeksAmerican,   true));
+        server.createContext("/implied-vol/european", wrap(ApiServer::impliedVolEuropean, true));
 
         int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
         server.setExecutor(Executors.newFixedThreadPool(threads));
@@ -198,6 +224,22 @@ public final class ApiServer {
     }
 
 
+    /** Convert the JSON dividends DTO to the engine's {@link DividendSchedule}. */
+    private static DividendSchedule toSchedule(DividendsDto d) {
+        if(d == null) return DividendSchedule.NONE;
+        double q = d.continuousYield() == null ? 0.0 : d.continuousYield();
+        DiscreteDividend[] disc = d.discrete();
+        if(disc == null || disc.length == 0) return DividendSchedule.continuous(q);
+        double[] times = new double[disc.length];
+        double[] amts  = new double[disc.length];
+        for(int i = 0; i < disc.length; i++) {
+            times[i] = disc[i].time();
+            amts[i]  = disc[i].amount();
+        }
+        return new DividendSchedule(q, times, amts);
+    }
+
+
     // ===================================================================
     //  Endpoint handlers
     // ===================================================================
@@ -210,7 +252,8 @@ public final class ApiServer {
     private static void priceEuropean(HttpExchange ex) throws IOException {
         EuropeanRequest req = readJson(ex, EuropeanRequest.class);
         EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
-        PricingResult res = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility);
+        DividendSchedule divs = toSchedule(req.dividends);
+        PricingResult res = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs);
         sendJson(ex, 200, new PriceResponse(res.getPrice()));
     }
 
@@ -220,9 +263,10 @@ public final class ApiServer {
         AsianOption opt = new AsianOption(
                 req.strike, req.timeToExpiry, parseType(req.type),
                 req.timeSteps, req.discreteMonitoring, req.arithmeticAverage);
+        DividendSchedule divs = toSchedule(req.dividends);
         PricingResult res = (req.simulations != null)
-                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations)
-                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility);
+                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
+                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, divs);
         sendJson(ex, 200, new PriceResponse(res.getPrice()));
     }
 
@@ -233,9 +277,10 @@ public final class ApiServer {
                 req.strike, req.timeToExpiry, parseType(req.type),
                 req.timeSteps, req.discreteMonitoring,
                 req.barrier, req.upBarrier, req.inBarrier);
+        DividendSchedule divs = toSchedule(req.dividends);
         PricingResult res = (req.simulations != null)
-                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations)
-                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility);
+                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
+                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, divs);
         sendJson(ex, 200, new PriceResponse(res.getPrice()));
     }
 
@@ -245,9 +290,10 @@ public final class ApiServer {
         LookbackOption opt = new LookbackOption(
                 req.strike, req.timeToExpiry, parseType(req.type),
                 req.timeSteps, req.discreteMonitoring, req.fixedStrike);
+        DividendSchedule divs = toSchedule(req.dividends);
         PricingResult res = (req.simulations != null)
-                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations)
-                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility);
+                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
+                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, divs);
         sendJson(ex, 200, new PriceResponse(res.getPrice()));
     }
 
@@ -256,9 +302,91 @@ public final class ApiServer {
         AmericanRequest req = readJson(ex, AmericanRequest.class);
         AmericanOption opt = new AmericanOption(
                 req.strike, req.timeToExpiry, parseType(req.type), req.exerciseDates);
+        DividendSchedule divs = toSchedule(req.dividends);
         PricingResult res = (req.simulations != null)
-                ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations)
-                : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility);
+                ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
+                : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs);
         sendJson(ex, 200, new PriceResponse(res.getPrice()));
+    }
+
+
+    // ===================================================================
+    //  /greeks/* — returns both the price and the Greeks
+    // ===================================================================
+
+    private static void greeksEuropean(HttpExchange ex) throws IOException {
+        EuropeanRequest req = readJson(ex, EuropeanRequest.class);
+        EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
+        DividendSchedule divs = toSchedule(req.dividends);
+        PricingResult res = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs);
+        Greeks g = GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs);
+        sendJson(ex, 200, new PriceAndGreeksResponse(res.getPrice(), g));
+    }
+
+    private static void greeksAsian(HttpExchange ex) throws IOException {
+        AsianRequest req = readJson(ex, AsianRequest.class);
+        AsianOption opt = new AsianOption(
+                req.strike, req.timeToExpiry, parseType(req.type),
+                req.timeSteps, req.discreteMonitoring, req.arithmeticAverage);
+        priceAndGreeksMc(ex, opt, req.spot, req.rate, req.volatility, req.simulations, toSchedule(req.dividends));
+    }
+
+    private static void greeksBarrier(HttpExchange ex) throws IOException {
+        BarrierRequest req = readJson(ex, BarrierRequest.class);
+        BarrierOption opt = new BarrierOption(
+                req.strike, req.timeToExpiry, parseType(req.type),
+                req.timeSteps, req.discreteMonitoring,
+                req.barrier, req.upBarrier, req.inBarrier);
+        priceAndGreeksMc(ex, opt, req.spot, req.rate, req.volatility, req.simulations, toSchedule(req.dividends));
+    }
+
+    private static void greeksLookback(HttpExchange ex) throws IOException {
+        LookbackRequest req = readJson(ex, LookbackRequest.class);
+        LookbackOption opt = new LookbackOption(
+                req.strike, req.timeToExpiry, parseType(req.type),
+                req.timeSteps, req.discreteMonitoring, req.fixedStrike);
+        priceAndGreeksMc(ex, opt, req.spot, req.rate, req.volatility, req.simulations, toSchedule(req.dividends));
+    }
+
+    private static void greeksAmerican(HttpExchange ex) throws IOException {
+        AmericanRequest req = readJson(ex, AmericanRequest.class);
+        AmericanOption opt = new AmericanOption(
+                req.strike, req.timeToExpiry, parseType(req.type), req.exerciseDates);
+        DividendSchedule divs = toSchedule(req.dividends);
+        double price = (req.simulations != null)
+                ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
+                : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+        Greeks g = (req.simulations != null)
+                ? GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
+                : GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs);
+        sendJson(ex, 200, new PriceAndGreeksResponse(price, g));
+    }
+
+
+    // ===================================================================
+    //  /implied-vol/european
+    // ===================================================================
+
+    private static void impliedVolEuropean(HttpExchange ex) throws IOException {
+        ImpliedVolRequest req = readJson(ex, ImpliedVolRequest.class);
+        EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
+        DividendSchedule divs = toSchedule(req.dividends);
+        double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs);
+        double pAt = BlackScholesEngine.price(opt, req.spot, req.rate, iv, divs).getPrice();
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+    }
+
+
+    private static void priceAndGreeksMc(HttpExchange ex,
+                                         everything.optionpricer.model.PathDependentOption opt,
+                                         double spot, double r, double sigma, Integer simulations,
+                                         DividendSchedule dividends) throws IOException {
+        double price = (simulations != null)
+                ? MonteCarloEngine.price(opt, spot, r, sigma, simulations, dividends).getPrice()
+                : MonteCarloEngine.price(opt, spot, r, sigma, dividends).getPrice();
+        Greeks g = (simulations != null)
+                ? GreeksCalculator.compute(opt, spot, r, sigma, simulations, dividends)
+                : GreeksCalculator.compute(opt, spot, r, sigma, dividends);
+        sendJson(ex, 200, new PriceAndGreeksResponse(price, g));
     }
 }
