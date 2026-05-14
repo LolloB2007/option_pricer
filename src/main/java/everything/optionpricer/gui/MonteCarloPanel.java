@@ -1,5 +1,6 @@
 package everything.optionpricer.gui;
 
+import com.formdev.flatlaf.FlatClientProperties;
 import everything.optionpricer.model.AmericanOption;
 import everything.optionpricer.model.AsianOption;
 import everything.optionpricer.model.BarrierOption;
@@ -11,16 +12,13 @@ import everything.optionpricer.pricing.MonteCarloEngine;
 
 import javax.swing.*;
 import java.awt.CardLayout;
-import java.awt.GridBagConstraints;
-import java.awt.GridBagLayout;
+import java.awt.FlowLayout;
 import net.miginfocom.swing.MigLayout;
 
 
 /**
  * Monte Carlo pricing page — Asian, Barrier, Lookback (path-dependent MC)
- * plus American (Longstaff–Schwartz). Common GBM inputs at the top, a
- * method-specific card panel in the middle, and the underlying-price
- * 5/50/95% percentile chart underneath.
+ * plus American (Longstaff–Schwartz).
  *
  * @author lorenzobarbagelata
  */
@@ -35,21 +33,23 @@ public class MonteCarloPanel extends JPanel {
 
     // Common inputs
     private JComboBox<OptionType> optionTypeCombo;
-    private JComboBox<String> methodCombo;
     private JTextField spotField, strikeField, rateField, volField, timeField, stepsField;
 
+    // Method picker (segmented)
+    private JToggleButton segAsian, segBarrier, segLookback, segAmerican;
+
     // Asian-specific
-    private JComboBox<String> asianAverageCombo;     // arithmetic / geometric
-    private JComboBox<String> asianMonitoringCombo;  // discrete / continuous
+    private JComboBox<String> asianAverageCombo;
+    private JComboBox<String> asianMonitoringCombo;
 
     // Barrier-specific
     private JTextField barrierField;
-    private JComboBox<String> barrierDirCombo;       // up / down
-    private JComboBox<String> barrierInOutCombo;     // in / out
+    private JComboBox<String> barrierDirCombo;
+    private JComboBox<String> barrierInOutCombo;
     private JComboBox<String> barrierMonitoringCombo;
 
     // Lookback-specific
-    private JComboBox<String> lookbackStrikeCombo;   // fixed / floating
+    private JComboBox<String> lookbackStrikeCombo;
     private JComboBox<String> lookbackMonitoringCombo;
 
     // American-specific
@@ -59,146 +59,173 @@ public class MonteCarloPanel extends JPanel {
     private JPanel cardPanel;
 
     private JButton priceButton;
-    private JLabel resultLabel;
+    private ResultPill resultLabel;
     private QuantileChartPanel chart;
 
 
     public MonteCarloPanel() {
         setLayout(new MigLayout(
-                "fillx, insets 14",
-                "[right]10[grow, fill]",
-                ""
+                "fillx, insets 24 28 24 28",
+                "[grow, fill]",
+                "[]14[]14[]14[]10[]10[]14[]"
         ));
-
         componentInit();
 
-        add(new JLabel("Monte Carlo pricer — % as decimals, time in years",
-                SwingConstants.CENTER), "span 2, growx, wrap, gapbottom 6");
+        add(Theme.title("Monte Carlo"), "wrap");
+        add(Theme.subtitle("Path-dependent and American options"), "wrap, gapbottom 4");
 
-        add(new JLabel("Method:"));         add(methodCombo,      "wrap");
-        add(new JLabel("Option Type:"));    add(optionTypeCombo,  "wrap");
-        add(new JLabel("Spot Price (S):"));     add(spotField,    "wrap");
-        add(new JLabel("Strike Price (K):"));   add(strikeField,  "wrap");
-        add(new JLabel("Risk-Free Rate (r):")); add(rateField,    "wrap");
-        add(new JLabel("Volatility (σ):"));     add(volField,     "wrap");
-        add(new JLabel("Time to Expiry (T):")); add(timeField,    "wrap");
-        add(new JLabel("Time Steps:"));         add(stepsField,   "wrap, gapbottom 8");
+        add(buildSegmented(), "growx, wrap");
+        add(buildCommonInputs(), "growx, wrap");
+        add(cardPanel, "growx, wrap");
 
-        add(cardPanel, "span 2, growx, wrap, gapbottom 8");
-        add(priceButton, "span 2, center, wrap");
-        add(resultLabel, "span 2, growx, alignx center, wrap, gaptop 4");
-        add(chart, "span 2, grow, push, gaptop 8");
+        add(priceButton, "alignx center, wrap, gaptop 2");
+        add(resultLabel, "alignx center, wrap, gaptop 2");
+        add(chart, "grow, push, gaptop 8");
     }
 
 
     private void componentInit() {
         optionTypeCombo = new JComboBox<>(OptionType.values());
-        methodCombo = new JComboBox<>(new String[] { "Asian", "Barrier", "Lookback", "American" });
-        methodCombo.addActionListener(e -> cardLayout.show(cardPanel, currentCardKey()));
 
-        spotField   = new JTextField("100", 8);
-        strikeField = new JTextField("100", 8);
-        rateField   = new JTextField("0.05", 8);
-        volField    = new JTextField("0.20", 8);
-        timeField   = new JTextField("1.00", 8);
-        stepsField  = new JTextField("252", 8);
+        spotField   = field("100");
+        strikeField = field("100");
+        rateField   = field("0.05");
+        volField    = field("0.20");
+        timeField   = field("1.00");
+        stepsField  = field("252");
 
-        // Asian card
+        // Segmented method picker
+        ButtonGroup grp = new ButtonGroup();
+        segAsian    = makeSegment("Asian",    grp, CARD_ASIAN);
+        segBarrier  = makeSegment("Barrier",  grp, CARD_BARRIER);
+        segLookback = makeSegment("Lookback", grp, CARD_LOOKBACK);
+        segAmerican = makeSegment("American", grp, CARD_AMERICAN);
+        segAsian.setSelected(true);
+
         asianAverageCombo    = new JComboBox<>(new String[] { "Arithmetic", "Geometric" });
         asianMonitoringCombo = new JComboBox<>(new String[] { "Discrete", "Continuous" });
 
-        // Barrier card
-        barrierField           = new JTextField("120", 8);
+        barrierField           = field("120");
         barrierDirCombo        = new JComboBox<>(new String[] { "Up", "Down" });
         barrierInOutCombo      = new JComboBox<>(new String[] { "Out", "In" });
         barrierMonitoringCombo = new JComboBox<>(new String[] { "Discrete", "Continuous" });
 
-        // Lookback card
         lookbackStrikeCombo     = new JComboBox<>(new String[] { "Fixed strike", "Floating strike" });
         lookbackMonitoringCombo = new JComboBox<>(new String[] { "Discrete", "Continuous" });
 
-        // American card
-        americanExerciseField = new JTextField("50", 8);
+        americanExerciseField = field("50");
 
         cardLayout = new CardLayout();
         cardPanel  = new JPanel(cardLayout);
+        cardPanel.setOpaque(false);
         cardPanel.add(buildAsianCard(),    CARD_ASIAN);
         cardPanel.add(buildBarrierCard(),  CARD_BARRIER);
         cardPanel.add(buildLookbackCard(), CARD_LOOKBACK);
         cardPanel.add(buildAmericanCard(), CARD_AMERICAN);
 
         priceButton = new JButton("Price option");
+        Theme.stylePrimary(priceButton);
         priceButton.addActionListener(e -> onPrice());
 
-        resultLabel = new JLabel("", SwingConstants.CENTER);
-        resultLabel.setVisible(false);
-
-        chart = new QuantileChartPanel();
+        resultLabel = new ResultPill();
+        chart       = new QuantileChartPanel();
     }
 
 
-    // ----- Cards ----- //
-
-    private JPanel buildAsianCard() {
-        JPanel p = newCard();
-        addRow(p, 0, "Average:",    asianAverageCombo);
-        addRow(p, 1, "Monitoring:", asianMonitoringCombo);
-        return p;
-    }
-
-    private JPanel buildBarrierCard() {
-        JPanel p = newCard();
-        addRow(p, 0, "Barrier (B):", barrierField);
-        addRow(p, 1, "Direction:",   barrierDirCombo);
-        addRow(p, 2, "In/Out:",      barrierInOutCombo);
-        addRow(p, 3, "Monitoring:",  barrierMonitoringCombo);
-        return p;
-    }
-
-    private JPanel buildLookbackCard() {
-        JPanel p = newCard();
-        addRow(p, 0, "Strike type:", lookbackStrikeCombo);
-        addRow(p, 1, "Monitoring:",  lookbackMonitoringCombo);
-        return p;
-    }
-
-    private JPanel buildAmericanCard() {
-        JPanel p = newCard();
-        addRow(p, 0, "Exercise dates:", americanExerciseField);
-        return p;
-    }
-
-    private static JPanel newCard() {
-        JPanel p = new JPanel(new GridBagLayout());
-        p.setBorder(BorderFactory.createTitledBorder("Method parameters"));
-        return p;
-    }
-
-    private static void addRow(JPanel parent, int row, String label, java.awt.Component field) {
-        GridBagConstraints lc = new GridBagConstraints();
-        lc.gridx = 0; lc.gridy = row; lc.anchor = GridBagConstraints.LINE_END;
-        lc.insets = new java.awt.Insets(3, 6, 3, 6);
-        parent.add(new JLabel(label), lc);
-        GridBagConstraints fc = new GridBagConstraints();
-        fc.gridx = 1; fc.gridy = row; fc.anchor = GridBagConstraints.LINE_START;
-        fc.fill = GridBagConstraints.HORIZONTAL; fc.weightx = 1.0;
-        fc.insets = new java.awt.Insets(3, 0, 3, 6);
-        parent.add(field, fc);
+    private JToggleButton makeSegment(String label, ButtonGroup grp, String cardKey) {
+        JToggleButton b = new JToggleButton(label);
+        Theme.styleSegment(b);
+        grp.add(b);
+        b.addActionListener(e -> cardLayout.show(cardPanel, cardKey));
+        return b;
     }
 
 
-    private String currentCardKey() {
-        switch((String) methodCombo.getSelectedItem()) {
-            case "Asian":    return CARD_ASIAN;
-            case "Barrier":  return CARD_BARRIER;
-            case "Lookback": return CARD_LOOKBACK;
-            case "American": return CARD_AMERICAN;
-            default:         return CARD_ASIAN;
-        }
+    private JPanel buildSegmented() {
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        row.setOpaque(false);
+        row.add(segAsian);
+        row.add(segBarrier);
+        row.add(segLookback);
+        row.add(segAmerican);
+        return row;
     }
 
 
-    // ----- Pricing ----- //
+    private Card buildCommonInputs() {
+        Card card = new Card(new MigLayout(
+                "fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]",
+                "[]10[]10[]10[]"
+        ));
+        card.add(Theme.formLabel("Option type")); card.add(optionTypeCombo);
+        card.add(new JLabel());                   card.add(Theme.formLabel("Time steps"));   card.add(stepsField,   "wrap");
+        card.add(Theme.formLabel("Spot (S)"));    card.add(spotField);
+        card.add(new JLabel());                   card.add(Theme.formLabel("Strike (K)"));   card.add(strikeField,  "wrap");
+        card.add(Theme.formLabel("Rate (r)"));    card.add(rateField);
+        card.add(new JLabel());                   card.add(Theme.formLabel("Volatility (σ)")); card.add(volField,    "wrap");
+        card.add(Theme.formLabel("Time (T, yrs)")); card.add(timeField, "span 4, wrap");
+        return card;
+    }
+
+
+    private Card buildAsianCard() {
+        Card card = new Card(new MigLayout(
+                "fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]",
+                "[]10[]"
+        ));
+        card.add(Theme.formLabel("Average"));    card.add(asianAverageCombo);
+        card.add(new JLabel());                  card.add(Theme.formLabel("Monitoring")); card.add(asianMonitoringCombo, "wrap");
+        return card;
+    }
+
+    private Card buildBarrierCard() {
+        Card card = new Card(new MigLayout(
+                "fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]",
+                "[]10[]10[]"
+        ));
+        card.add(Theme.formLabel("Barrier (B)")); card.add(barrierField);
+        card.add(new JLabel());                   card.add(Theme.formLabel("Direction"));  card.add(barrierDirCombo,   "wrap");
+        card.add(Theme.formLabel("In / Out"));    card.add(barrierInOutCombo);
+        card.add(new JLabel());                   card.add(Theme.formLabel("Monitoring")); card.add(barrierMonitoringCombo, "wrap");
+        return card;
+    }
+
+    private Card buildLookbackCard() {
+        Card card = new Card(new MigLayout(
+                "fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]",
+                "[]"
+        ));
+        card.add(Theme.formLabel("Strike type")); card.add(lookbackStrikeCombo);
+        card.add(new JLabel());                   card.add(Theme.formLabel("Monitoring")); card.add(lookbackMonitoringCombo, "wrap");
+        return card;
+    }
+
+    private Card buildAmericanCard() {
+        Card card = new Card(new MigLayout("fillx, insets 0", "[120!][grow, fill]", "[]"));
+        card.add(Theme.formLabel("Exercise dates"));
+        card.add(americanExerciseField, "wrap");
+        return card;
+    }
+
+
+    private static JTextField field(String placeholder) {
+        JTextField f = new JTextField(8);
+        f.putClientProperty(FlatClientProperties.PLACEHOLDER_TEXT, placeholder);
+        return f;
+    }
+
+
+    private String currentMethod() {
+        if(segAsian.isSelected())    return "Asian";
+        if(segBarrier.isSelected())  return "Barrier";
+        if(segLookback.isSelected()) return "Lookback";
+        return "American";
+    }
+
 
     private void onPrice() {
         resultLabel.setVisible(false);
@@ -226,14 +253,11 @@ public class MonteCarloPanel extends JPanel {
         }
 
         OptionType type = (OptionType) optionTypeCombo.getSelectedItem();
-
-        // Update the chart regardless of which option type — it visualises the
-        // underlying's distribution, not the option payoff.
-        chart.setInputs(spot, rate, vol, time);
+        chart.setInputs(spot, strike, rate, vol, time, type);
 
         try {
             PricingResult result;
-            switch((String) methodCombo.getSelectedItem()) {
+            switch(currentMethod()) {
                 case "Asian":    result = priceAsian(type, strike, time, steps, spot, rate, vol);    break;
                 case "Barrier":  result = priceBarrier(type, strike, time, steps, spot, rate, vol);  break;
                 case "Lookback": result = priceLookback(type, strike, time, steps, spot, rate, vol); break;

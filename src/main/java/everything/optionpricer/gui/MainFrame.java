@@ -1,5 +1,6 @@
 package everything.optionpricer.gui;
 
+import javax.swing.BorderFactory;
 import javax.swing.JFrame;
 import javax.swing.JTabbedPane;
 
@@ -17,8 +18,9 @@ public class MainFrame extends JFrame {
         setDefaultCloseOperation(EXIT_ON_CLOSE);
 
         JTabbedPane tabs = new JTabbedPane();
-        tabs.addTab("European (Black–Scholes)", new EuropeanPanel());
-        tabs.addTab("Monte Carlo",              new MonteCarloPanel());
+        tabs.setBorder(BorderFactory.createEmptyBorder(6, 12, 0, 12));
+        tabs.addTab("European",   new EuropeanPanel());
+        tabs.addTab("Monte Carlo", new MonteCarloPanel());
 
         add(tabs);
     }

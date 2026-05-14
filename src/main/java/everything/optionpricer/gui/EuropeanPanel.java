@@ -1,5 +1,6 @@
 package everything.optionpricer.gui;
 
+import com.formdev.flatlaf.FlatClientProperties;
 import everything.optionpricer.model.EuropeanOption;
 import everything.optionpricer.model.OptionType;
 import everything.optionpricer.model.PricingResult;
@@ -21,46 +22,60 @@ public class EuropeanPanel extends JPanel {
     private JComboBox<OptionType> optionTypeCombo;
     private JTextField spotField, strikeField, rateField, volField, timeField;
     private JButton priceButton;
-    private JLabel resultLabel;
+    private ResultPill resultLabel;
 
 
     public EuropeanPanel() {
-        setLayout(new MigLayout(
-                "fillx, insets 20",
-                "[right]12[grow, fill]",
-                "[]10[]10[]10[]10[]10[]10[]20[]"
-        ));
-
+        setLayout(new MigLayout("fillx, insets 24 28 24 28", "[grow, fill]", "[]14[]18[]14[]"));
         componentInit();
 
-        add(new JLabel("Enter % as decimals (6% = 0.06) and time in years", SwingConstants.CENTER),
-                "span2, growx, alignxcenter, wrap");
+        add(Theme.title("European Option"), "wrap");
+        add(Theme.subtitle("Closed-form Black–Scholes pricer"), "wrap, gapbottom 6");
 
-        add(new JLabel("Option Type:"));        add(optionTypeCombo, "wrap");
-        add(new JLabel("Spot Price (S):"));     add(spotField,       "wrap");
-        add(new JLabel("Strike Price (K):"));   add(strikeField,     "wrap");
-        add(new JLabel("Risk-Free Rate (r):")); add(rateField,       "wrap");
-        add(new JLabel("Volatility (σ):"));     add(volField,        "wrap");
-        add(new JLabel("Time to Expiry (T):")); add(timeField,       "wrap");
+        add(buildInputs(), "growx, wrap");
 
-        add(priceButton, "span 2, center, wrap");
-        add(resultLabel, "span 2, growx, alignx center");
+        add(priceButton, "alignx center, wrap, gaptop 4");
+        add(resultLabel, "alignx center, wrap, gaptop 6");
     }
 
 
     private void componentInit() {
         optionTypeCombo = new JComboBox<>(OptionType.values());
-        spotField   = new JTextField(8);
-        strikeField = new JTextField(8);
-        rateField   = new JTextField(8);
-        volField    = new JTextField(8);
-        timeField   = new JTextField(8);
+
+        spotField   = field("e.g. 100");
+        strikeField = field("e.g. 100");
+        rateField   = field("e.g. 0.05");
+        volField    = field("e.g. 0.20");
+        timeField   = field("e.g. 1.00");
 
         priceButton = new JButton("Price option");
+        Theme.stylePrimary(priceButton);
         priceButton.addActionListener(e -> onPrice());
 
-        resultLabel = new JLabel("", SwingConstants.CENTER);
-        resultLabel.setVisible(false);
+        resultLabel = new ResultPill();
+    }
+
+
+    private Card buildInputs() {
+        Card card = new Card(new MigLayout(
+                "fillx, insets 0",
+                "[120!][grow, fill]",
+                "[]10[]10[]10[]10[]10[]"
+        ));
+        card.add(Theme.formLabel("Option type"));  card.add(optionTypeCombo, "wrap");
+        card.add(Theme.formLabel("Spot (S)"));     card.add(spotField,       "wrap");
+        card.add(Theme.formLabel("Strike (K)"));   card.add(strikeField,     "wrap");
+        card.add(Theme.formLabel("Rate (r)"));     card.add(rateField,       "wrap");
+        card.add(Theme.formLabel("Volatility (σ)")); card.add(volField,      "wrap");
+        card.add(Theme.formLabel("Time (T, yrs)")); card.add(timeField,      "wrap");
+        return card;
+    }
+
+
+    private static JTextField field(String placeholder) {
+        JTextField f = new JTextField(10);
+        f.putClientProperty(FlatClientProperties.PLACEHOLDER_TEXT, placeholder);
+        return f;
     }
 
 
