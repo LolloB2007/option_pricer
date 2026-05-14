@@ -1,106 +1,78 @@
 package everything.optionpricer.util;
 
-import java.util.Random;
+import java.util.concurrent.ThreadLocalRandom;
 
 
 /**
- * Assistant for standard Normal Distribution calculations
- * Will definitely be used with Black Scholes, maybe for future expansions of project
+ * Standard Normal distribution helpers (pdf, cdf, inverse cdf, sampling).
  * @author lorenzobarbagelata
  */
 public final class NormalDistribution {
-    
-    private static final double ONE_OVER_SQRT_2PI = 1 / (Math.sqrt(2 * Math.PI));
-    private static final double SQRT_2 = Math.sqrt(2);
-    
-    private static final Random DEFAULT_RNG = new Random();
-    
-    
+
+    private static final double ONE_OVER_SQRT_2PI = 1.0 / Math.sqrt(2.0 * Math.PI);
+
+    private NormalDistribution() {}
+
+
     /**
-     * Returns standard normal distribution pdf at x
-     * @param x
-     * @return double
+     * Standard normal pdf at x.
      */
     public static double pdf(double x) {
-        
         return ONE_OVER_SQRT_2PI * Math.exp(-0.5 * x * x);
     }
-    
-    
+
+
     /**
-     * Returns standard normal distribution cdf at x
-     * Uses Abramowitz-Stegun style approximation
-     * @param x
-     * @return double
+     * Standard normal cdf at x (Abramowitz–Stegun approximation).
      */
     public static double cdf(double x) {
-        
-        if(x > 8.0)
-            return 1.0;
-        
-        if(x < -8.0)
-            return 0.0;
-        
+
+        if(x >  8.0) return 1.0;
+        if(x < -8.0) return 0.0;
+
         double absX = Math.abs(x);
-        double temp = 1.0 / (1.0 + 0.2316419 * absX);
-        
-        double poly = temp * (0.319381530 +
-                temp * (-0.356563782 +
-                temp * (1.781477937 +
-                temp * (-1.821255978 +
-                temp * 1.330274429)))
-                );
-        
-        double approx = 1.0 - (pdf(absX) * poly);
-        
-        return x >= 0.0 ? approx : (1.0 - approx);
-    }
-    
-    
-    /**
-     * Returns complement of cdf(x)
-     * @param x
-     * @return double
-     */
-    public static double cdfComplement(double x) {
-        
-        return 1.0 - cdf(x);
-    }
-    
-    
-    /**
-     * Returns inverse cdf of p. Uses mix of Schmeiser and Shore approximations for calculation
-     * @param p
-     * @return double
-     */
-    public static double cdfInverse(double p) {
-        
-        if(0.5 <= p && p < 0.958) {
-            return ((Math.pow(p, 0.135) - Math.pow(1-p, 0.135))/0.1975); //Schmeiser
-        } else if (p >= 0.958) { 
-            return (-5.531*(Math.pow((1-p)/p, 0.1193)-1)); //Shore
-        } else {
-            return (-1.0 * cdfInverse(1-p)); //Recursive call for negative case
-        }
-    }
-    
-    
-    /**
-     * Returns double based on Gaussian distribution with mu = 0, sigma = 1
-     * @return double
-     */
-    public static double sampleStandardNormal() {
-        return sampleStandardNormal(DEFAULT_RNG);
+        double t = 1.0 / (1.0 + 0.2316419 * absX);
+
+        double poly = t * (0.319381530 +
+                      t * (-0.356563782 +
+                      t * (1.781477937 +
+                      t * (-1.821255978 +
+                      t *  1.330274429))));
+
+        double approx = 1.0 - pdf(absX) * poly;
+        return x >= 0.0 ? approx : 1.0 - approx;
     }
 
-    
-    /**
-     * Aids no parameter method
-     * @param rng
-     * @return double
-     */
-    private static double sampleStandardNormal(Random rng) {
-        return rng.nextGaussian();
+
+    public static double cdfComplement(double x) {
+        return 1.0 - cdf(x);
     }
-    
+
+
+    /**
+     * Approximate inverse standard-normal cdf (Schmeiser / Shore blend).
+     */
+    public static double cdfInverse(double p) {
+
+        if(p <= 0.0 || p >= 1.0)
+            throw new IllegalArgumentException("p must lie in (0, 1)");
+
+        if(p < 0.5)
+            return -cdfInverse(1.0 - p);
+
+        if(p < 0.958)
+            return (Math.pow(p, 0.135) - Math.pow(1.0 - p, 0.135)) / 0.1975; // Schmeiser
+
+        return -5.531 * (Math.pow((1.0 - p) / p, 0.1193) - 1.0); // Shore
+    }
+
+
+    /**
+     * Sample from the standard normal using the current thread's RNG.
+     * Uses ThreadLocalRandom so parallel Monte Carlo simulations do not
+     * contend on a shared synchronized generator.
+     */
+    public static double sampleStandardNormal() {
+        return ThreadLocalRandom.current().nextGaussian();
+    }
 }

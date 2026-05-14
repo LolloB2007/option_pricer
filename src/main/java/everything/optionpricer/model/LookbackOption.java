@@ -1,96 +1,72 @@
 package everything.optionpricer.model;
 
+import everything.optionpricer.pricing.PathAccumulator;
+
+
 /**
- * implementation of lookback options
+ * Lookback option (fixed-strike or floating-strike).
  * @author lorenzobarbagelata
  */
 public class LookbackOption extends PathDependentOption {
 
     private final boolean fixedStrike;
-    
-    
-    /**
-     * Constructor for LookbackOption
-     * @param sP
-     * @param tE
-     * @param type
-     * @param tS
-     * @param discreteMonitoring
-     * @param fixedStrike 
-     */
-    public LookbackOption(double sP, double tE, OptionType type, int tS, boolean discreteMonitoring, boolean fixedStrike) {
-        super(sP, tE, type, tS, discreteMonitoring);
+
+
+    public LookbackOption(double strikePrice, double timeToExpiry, OptionType type,
+                          int timeSteps, boolean discreteMonitoring, boolean fixedStrike) {
+        super(strikePrice, timeToExpiry, type, timeSteps, discreteMonitoring);
         this.fixedStrike = fixedStrike;
     }
-    
-    
-    /**
-     * Getter for fixedStrike
-     * @return boolean
-     */
+
+
     public boolean isFixedStrike() {
         return fixedStrike;
     }
-    
-    
-    /**
-     * Calculates payoff for Monte Carlo steps
-     * @param path
-     * @return double
-     */
+
+
     @Override
-    public double payoff(double[] path) {
-        double pathMax = findMax(path);
-        double pathMin = findMin(path);
-        double finalPrice = path[path.length - 1];
-        
-        if(fixedStrike) {
-            if(isCall()) {
-                return Math.max(pathMax - getStrikePrice(), 0);
-            } else {
-                return Math.max(getStrikePrice() - pathMin, 0);
-            }
-        } else {
-            if(isCall()) {
-                return Math.max(finalPrice - pathMin, 0);
-            } else {
-                return Math.max(pathMax - finalPrice, 0);
-            }
-        }
+    public PathAccumulator newAccumulator() {
+        return new Acc();
     }
 
-    
-    /**
-     * Helper method that finds max in a path
-     * @param path
-     * @return double
-     */
-    private double findMax(double[] path) {
-        double max = path[0];
-        
-        for(int i = 1; i<path.length; i++) {
-            if(path[i] > max)
-                max = path[i];
-        }
-        
-        return max;
-    }
 
-    
-    /**
-     * Helper method that finds min in a path
-     * @param path
-     * @return 
-     */
-    private double findMin(double[] path) {
-        double min = path[0];
-        
-        for(int i = 1; i<path.length; i++) {
-            if(path[i] < min)
-                min = path[i];
+    // min/max/last are monotonic in log-price — track them in log-space, exp
+    // only at payoff time (at most twice). Saves a Math.exp per step.
+    private final class Acc implements PathAccumulator {
+        private double logMin = Double.POSITIVE_INFINITY;
+        private double logMax = Double.NEGATIVE_INFINITY;
+        private double logLast;
+
+        @Override
+        public void accumulate(double price, double logPrice) {
+            if(logPrice < logMin) logMin = logPrice;
+            if(logPrice > logMax) logMax = logPrice;
+            logLast = logPrice;
         }
-        
-        return min;
+
+        @Override
+        public double payoff() {
+            if(fixedStrike) {
+                return isCall()
+                        ? Math.max(Math.exp(logMax) - getStrikePrice(), 0.0)
+                        : Math.max(getStrikePrice() - Math.exp(logMin), 0.0);
+            }
+            double last = Math.exp(logLast);
+            return isCall()
+                    ? Math.max(last - Math.exp(logMin), 0.0)
+                    : Math.max(Math.exp(logMax) - last, 0.0);
+        }
+
+        @Override
+        public void reset() {
+            logMin = Double.POSITIVE_INFINITY;
+            logMax = Double.NEGATIVE_INFINITY;
+            logLast = 0.0;
+        }
+
+        @Override
+        public boolean needsPrice() {
+            return false;
+        }
     }
-    
 }

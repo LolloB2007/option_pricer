@@ -1,110 +1,87 @@
 package everything.optionpricer.model;
 
+import everything.optionpricer.pricing.PathAccumulator;
+
+
 /**
- * implementation of barrier options
+ * Barrier option (up/down, in/out).
  * @author lorenzobarbagelata
  */
 public class BarrierOption extends PathDependentOption {
-    
+
     private final double barrier;
+    private final double logBarrier; // precomputed; log(B) doesn't change across sims
     private final boolean upBarrier;
     private final boolean inBarrier;
-    
-    
-    /**
-     * Constructor for BarrierOption
-     * @param strikePrice
-     * @param timeToExpiry
-     * @param type
-     * @param timeSteps
-     * @param discreteMonitoring
-     * @param barrier
-     * @param upBarrier
-     * @param inBarrier 
-     */
-    public BarrierOption(double strikePrice, double timeToExpiry, OptionType type, int timeSteps, boolean discreteMonitoring, double barrier, boolean upBarrier, boolean inBarrier) {
+
+
+    public BarrierOption(double strikePrice, double timeToExpiry, OptionType type,
+                         int timeSteps, boolean discreteMonitoring,
+                         double barrier, boolean upBarrier, boolean inBarrier) {
         super(strikePrice, timeToExpiry, type, timeSteps, discreteMonitoring);
+
+        if(barrier <= 0)
+            throw new IllegalArgumentException("Please enter valid barrier");
+
         this.barrier = barrier;
+        this.logBarrier = Math.log(barrier);
         this.upBarrier = upBarrier;
         this.inBarrier = inBarrier;
     }
 
-    
-    /**
-     * Getter for barrier
-     * @return double
-     */
-    public double getBarrier() {
-        return barrier;
-    }
 
-    
-    /**
-     * Getter for upBarrier
-     * @return boolean
-     */
-    public boolean isUpBarrier() {
-        return upBarrier;
-    }
-    
-    
-    /**
-     * Getter for inBarrier
-     * @return double
-     */
-    public boolean isInBarrier() {
-        return inBarrier;
-    }
-    
+    public double getBarrier()    { return barrier; }
+    public boolean isUpBarrier()  { return upBarrier; }
+    public boolean isInBarrier()  { return inBarrier; }
 
-    /**
-     * Calculates payoff of function
-     * @param path
-     * @return double
-     */
+
     @Override
-    public double payoff(double[] path) {
-        boolean isHit = checkBarrierHit(path);
-        
-        boolean stillActive;
-        
-        if(inBarrier) {
-            stillActive = isHit;
-        } else {
-            stillActive = !isHit;
-        }
-        
-        if(!stillActive)
-            return 0.0;
-        
-        double finalPrice = path[path.length - 1];
-        
-        if(isCall())
-            return Math.max(finalPrice - getStrikePrice(), 0.0);
-            
-        return Math.max(getStrikePrice() - finalPrice, 0.0);
+    public PathAccumulator newAccumulator() {
+        return new Acc();
     }
 
-    
-    /**
-     * Helper to payoff
-     * @param path
-     * @return boolean
-     */
-    private boolean checkBarrierHit(double[] path) {
-        
-        for(double point : path) {
-            if(upBarrier) {
-                if(point >= barrier)
-                    return true;
-            } else {
-                if(point <= barrier) {
-                    return true;
-                }
+
+    // Hit-check is monotonic in log-price, and the payoff only needs the final
+    // price (computed via Math.exp once at the end) — so the engine can skip
+    // Math.exp for every intermediate step.
+    private final class Acc implements PathAccumulator {
+        private boolean hit;
+        private double lastLogPrice;
+
+        @Override
+        public void accumulate(double price, double logPrice) {
+            lastLogPrice = logPrice;
+            if(!hit) {
+                if(upBarrier ? logPrice >= logBarrier : logPrice <= logBarrier)
+                    hit = true;
             }
         }
-        
-        return false;
+
+        @Override
+        public double payoff() {
+            boolean alive = inBarrier ? hit : !hit;
+            if(!alive)
+                return 0.0;
+
+            double finalPrice = Math.exp(lastLogPrice);
+            return Math.max(getSign() * (finalPrice - getStrikePrice()), 0.0);
+        }
+
+        @Override
+        public void reset() {
+            hit = false;
+            lastLogPrice = 0.0;
+        }
+
+        // OUT options: once knocked out, payoff is locked at 0 — skip the rest of the path.
+        @Override
+        public boolean isDone() {
+            return !inBarrier && hit;
+        }
+
+        @Override
+        public boolean needsPrice() {
+            return false;
+        }
     }
-    
 }

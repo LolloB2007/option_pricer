@@ -1,95 +1,85 @@
 package everything.optionpricer.model;
 
+import everything.optionpricer.pricing.PathAccumulator;
+
 
 /**
- * implementation of asian options
+ * Asian option (arithmetic or geometric average).
  * @author lorenzobarbagelata
  */
 public class AsianOption extends PathDependentOption {
-    
-    private boolean arithmeticAverage;
-    
-    
-    /**
-     * Constructor for option
-     * @param sP --> strike price
-     * @param tE --> time to expiry
-     * @param type --> option type
-     * @param tS --> time steps
-     * @param arithmeticAverage
-     */
-    public AsianOption(double sP, double tE, OptionType type, int tS, boolean arithmeticAverage) {
-        super(sP, tE, type, tS, false);
-        
+
+    private final boolean arithmeticAverage;
+
+
+    public AsianOption(double strikePrice, double timeToExpiry, OptionType type,
+                       int timeSteps, boolean discreteMonitoring, boolean arithmeticAverage) {
+        super(strikePrice, timeToExpiry, type, timeSteps, discreteMonitoring);
         this.arithmeticAverage = arithmeticAverage;
     }
 
-    
-    /**
-     * Getter for arithmetic average
-     * @return boolean
-     */
+
     public boolean isArithmeticAverage() {
         return arithmeticAverage;
     }
-    
 
-    /**
-     * Returns payoff of option
-     * @param path
-     * @return double
-     */
+
     @Override
-    public double payoff(double[] path) {
-        double average;
-        
-        if(this.arithmeticAverage) {
-            average = computeArithmeticAverage(path);
-        } else {
-            average = computeGeometricAverage(path);
+    public PathAccumulator newAccumulator() {
+        return arithmeticAverage ? new ArithmeticAcc() : new GeometricAcc();
+    }
+
+
+    // Arithmetic Asian: needs prices in linear space — payoff is mean(price) - K.
+    private final class ArithmeticAcc implements PathAccumulator {
+        private double sum;
+        private int count;
+
+        @Override
+        public void accumulate(double price, double logPrice) {
+            sum += price;
+            count++;
         }
-        
-        if(this.isCall()) {
-            return Math.max(average - this.getStrikePrice(), 0.0);
-        } else {
-            return Math.max(this.getStrikePrice() - average, 0.0);
+
+        @Override
+        public double payoff() {
+            return Math.max(getSign() * (sum / count - getStrikePrice()), 0.0);
+        }
+
+        @Override
+        public void reset() {
+            sum = 0.0;
+            count = 0;
         }
     }
 
-    
-    /**
-     * Computes arithmetic average of prices in path
-     * Helper to payoff
-     * @param path
-     * @return double
-     */
-    private double computeArithmeticAverage(double[] path) {
-        int length = path.length;
-        double total = 0.0;
-        
-        for(int i = 0; i<length; i++) {
-            total += path[i];
-        }
-        
-        return (total/length);
-    }
 
-    
-    /**
-     * Computes geometric average of prices in path
-     * Uses log addition to avoid issues with numbers getting too big for java
-     * Helper to payoff
-     * @param path
-     * @return double
-     */
-    private double computeGeometricAverage(double[] path) {
-        int length = path.length;
-        double lnSum = 0.0;
-        
-        for(int i = 0; i<length; i++) {
-            lnSum += Math.log(path[i]);
+    // Geometric Asian works entirely in log-space; engine can skip per-step Math.exp.
+    private final class GeometricAcc implements PathAccumulator {
+        private double lnSum;
+        private int count;
+
+        @Override
+        public void accumulate(double price, double logPrice) {
+            lnSum += logPrice;
+            count++;
         }
-        
-        return (Math.exp(lnSum/length));
+
+        @Override
+        public double payoff() {
+            double avg = Math.exp(lnSum / count);
+            return Math.max(getSign() * (avg - getStrikePrice()), 0.0);
+        }
+
+        @Override
+        public void reset() {
+            lnSum = 0.0;
+            count = 0;
+        }
+
+        @Override
+        public boolean needsPrice() {
+            return false;
+        }
     }
 }

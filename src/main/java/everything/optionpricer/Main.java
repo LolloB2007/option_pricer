@@ -4,22 +4,22 @@ import com.formdev.flatlaf.FlatDarkLaf;
 import everything.optionpricer.gui.MainFrame;
 import javax.swing.SwingUtilities;
 
+
 /**
- * entry point
+ * Application entry point.
  * @author lorenzobarbagelata
  */
 public class Main {
 
     public static void main(String[] args) {
-        
+
         FlatDarkLaf.setup();
-        
-        SwingUtilities.invokeLater( () -> {
+
+        SwingUtilities.invokeLater(() -> {
             MainFrame main = new MainFrame();
             main.setSize(400, 380);
             main.setLocationRelativeTo(null);
             main.setVisible(true);
         });
-        
     }
 }
