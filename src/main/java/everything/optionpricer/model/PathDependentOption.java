@@ -1,6 +1,7 @@
 package everything.optionpricer.model;
 
 import everything.optionpricer.pricing.PathAccumulator;
+import everything.optionpricer.pricing.SimulationContext;
 
 
 /**
@@ -37,6 +38,8 @@ public abstract class PathDependentOption extends Option {
 
     /**
      * Build a fresh, stateful accumulator for one Monte Carlo simulation.
+     * The {@link SimulationContext} carries per-step constants the
+     * continuous-monitoring variants need (Brownian-bridge math).
      */
-    public abstract PathAccumulator newAccumulator();
+    public abstract PathAccumulator newAccumulator(SimulationContext ctx);
 }

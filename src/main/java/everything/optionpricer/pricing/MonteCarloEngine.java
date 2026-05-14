@@ -50,6 +50,7 @@ public final class MonteCarloEngine {
         final double drift = (riskFreeRate - 0.5 * volatility * volatility) * dt;
         final double diff  = volatility * Math.sqrt(dt);
         final double logSpot = Math.log(spot);
+        final SimulationContext ctx = new SimulationContext(dt, volatility);
 
         // Antithetic: run pairs of paths (z, -z). Round up so the effective
         // sample count is at least `sims`.
@@ -61,7 +62,7 @@ public final class MonteCarloEngine {
             int start = t * batchSize;
             int end   = Math.min(pairs, start + batchSize);
             if(start >= end) return 0.0;
-            return runBatch(option, spot, logSpot, drift, diff, tS, end - start);
+            return runBatch(option, ctx, spot, logSpot, drift, diff, tS, end - start);
         }).sum();
 
         double averagePayoff = sum / (2.0 * pairs);
@@ -74,11 +75,12 @@ public final class MonteCarloEngine {
      * Run {@code pairCount} antithetic simulation pairs. Allocates two
      * accumulators once and reuses them via {@link PathAccumulator#reset()}.
      */
-    private static double runBatch(PathDependentOption option, double spot, double logSpot,
+    private static double runBatch(PathDependentOption option, SimulationContext ctx,
+                                   double spot, double logSpot,
                                    double drift, double diff, int tS, int pairCount) {
 
-        final PathAccumulator accPos = option.newAccumulator();
-        final PathAccumulator accNeg = option.newAccumulator();
+        final PathAccumulator accPos = option.newAccumulator(ctx);
+        final PathAccumulator accNeg = option.newAccumulator(ctx);
         final boolean needsPrice = accPos.needsPrice();
         final ThreadLocalRandom rng = ThreadLocalRandom.current();
 
