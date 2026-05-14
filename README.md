@@ -4,15 +4,18 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v2.0**
+**Current release: v2.1**
 
-Major expansion over v1.0:
+Highlights since v1.0:
 
 - Path-dependent options (Asian, Barrier, Lookback) priced by a parallel antithetic Monte Carlo engine.
 - American options priced by **Longstaff–Schwartz** regression Monte Carlo.
 - Both **discrete** and **continuous** monitoring for the path-dependent types, including Brownian-bridge corrections.
-- Redesigned tabbed UI with a live 5/50/95% percentile chart of the option value, including a hover crosshair + tooltip readout.
-- **HTTP/JSON API** so other applications can request prices over the network.
+- **Greeks** (Δ, Γ, ν, Θ, ρ) for every option type — closed-form for European, common-random-numbers finite differences for the others.
+- **Implied volatility** solver (Newton-Raphson with bisection fallback).
+- **Continuous dividend yield + discrete cash dividends** across every pricer.
+- Tabbed UI with a live 5/50/95% percentile chart + a payoff diagram on each tab.
+- **HTTP/JSON API** so other applications can request prices, Greeks and implied vol over the network.
 
 ## Overview
 
@@ -32,6 +35,23 @@ The application can be used in two ways:
 - **Lookback** — fixed or floating strike, discrete or continuous monitoring (Brownian-bridge max/min sampling)
 - **American** — Longstaff–Schwartz least-squares Monte Carlo
 
+### Greeks & implied vol
+- **Greeks** (delta, gamma, vega, theta, rho) for every option type
+  - European: closed-form Black–Scholes
+  - Path-dependent / American: common-random-numbers (CRN) finite differences against seeded MC / LSM — variance stays in the bump, not the simulation
+  - Output in practitioner conventions: vega per 1% σ, theta per day, rho per 1% rate
+- **Implied volatility** solver for European options
+  - Newton-Raphson with vega as the derivative
+  - Bisection fallback for deep ITM/OTM (where vega is too flat)
+  - Pre-flight no-arbitrage bounds check on the target price
+
+### Dividends
+- **Continuous dividend yield** `q` honoured by every pricer — drift becomes `r − q` in BS, MC and LSM
+- **Discrete cash dividends** as `(time, amount)` pairs
+  - BS uses the escrowed model (subtracts PV of dividends from spot)
+  - MC / LSM drop the simulated path by the dividend amount at the corresponding step
+- Greeks and implied vol pass the same schedule through every bumped re-price
+
 ### Monte Carlo engine
 - Parallel simulation across all available CPU cores (explicit chunked workload on the common ForkJoinPool)
 - Antithetic variates (halves RNG calls and roughly halves variance)
@@ -42,10 +62,12 @@ The application can be used in two ways:
 
 ### UI
 - Tabbed Swing GUI styled with **FlatLaf** (dark) + custom theme tweaks
-- **European** tab: Black–Scholes form
-- **Monte Carlo** tab: segmented method picker (Asian / Barrier / Lookback / American), card-based form layout, method-specific inputs
+- **European** tab: Black–Scholes form with closed-form Greeks and an inline implied-vol solver
+- **Monte Carlo** tab: segmented method picker (Asian / Barrier / Lookback / American), card-based form layout, method-specific inputs, async Greeks via SwingWorker
+- **Payoff diagram** on every tab — intrinsic-at-maturity hockey stick + smooth current-value curve, with S₀ guide line and K marker
 - Analytic **5 / 50 / 95% percentile chart** of the option's value over time, with a filled uncertainty band
-- **Hover readout** on the chart — vertical crosshair, dots at the three lines, tooltip with exact values at the cursor's time
+- **Hover readout** on the percentile chart — vertical crosshair, dots at the three lines, tooltip with exact values at the cursor's time
+- **Dividend yield** input on both tabs
 
 ### API
 - Same JAR; switch modes with a CLI flag
@@ -62,6 +84,7 @@ Common inputs for every option type:
 - **Risk-Free Rate** (`r`)
 - **Volatility** (`σ`)
 - **Time to Expiry** (`T`)
+- **Dividends** (optional) — continuous yield `q` and/or a list of discrete cash dividends
 
 Extra inputs by method:
 
@@ -77,6 +100,18 @@ Extra inputs by method:
 - **Risk-Free Rate** in **decimal form** — `6% = 0.06`
 - **Volatility** in **decimal form** — `15% = 0.15`
 - **Time to Expiry** in **years** — `6 months = 0.5`
+- **Continuous dividend yield** in **decimal form** — `3% = 0.03`
+- **Discrete dividend** times in **years from today**; amounts in the underlying's currency
+
+### Greek conventions
+
+| Greek | Meaning |
+|-------|---------|
+| **Δ** delta | change in price per **1.00** change in spot |
+| **Γ** gamma | change in delta per **1.00** change in spot |
+| **ν** vega  | change in price per **1% absolute** vol bump |
+| **Θ** theta | change in price per **calendar day** |
+| **ρ** rho   | change in price per **1% absolute** rate bump |
 
 ## Run
 
@@ -127,6 +162,8 @@ Errors return an HTTP 4xx/5xx status with:
 
 ### Endpoints
 
+**Price only** — returns `{ "price": <number> }`:
+
 | Verb | Path | Description |
 |------|------|-------------|
 | `GET`  | `/health` | Liveness check; returns `{"status":"ok"}` |
@@ -136,7 +173,37 @@ Errors return an HTTP 4xx/5xx status with:
 | `POST` | `/price/lookback` | Lookback option (Monte Carlo) |
 | `POST` | `/price/american` | American option (Longstaff–Schwartz) |
 
+**Price + Greeks** — same request body, returns `{ "price": <number>, "greeks": { delta, gamma, vega, theta, rho } }`:
+
+| Verb | Path |
+|------|------|
+| `POST` | `/greeks/european` |
+| `POST` | `/greeks/asian`    |
+| `POST` | `/greeks/barrier`  |
+| `POST` | `/greeks/lookback` |
+| `POST` | `/greeks/american` |
+
+**Implied volatility** — returns `{ "impliedVolatility": <number>, "price": <number> }`:
+
+| Verb | Path |
+|------|------|
+| `POST` | `/implied-vol/european` |
+
 ### Request bodies
+
+All bodies accept an optional **`dividends`** field of the shape:
+
+```json
+"dividends": {
+  "continuousYield": 0.03,
+  "discrete": [
+    { "time": 0.25, "amount": 1.5 },
+    { "time": 0.50, "amount": 1.5 }
+  ]
+}
+```
+
+Both `continuousYield` and `discrete` are independently optional; omit either or both. Times are in years from today.
 
 **European**
 ```json
@@ -198,7 +265,16 @@ Errors return an HTTP 4xx/5xx status with:
 }
 ```
 
-`simulations` is optional on every Monte Carlo / LSM endpoint; omit it to use the engine default (100 000 for path-dependent, 50 000 for American). `type` accepts `"CALL"` or `"PUT"` case-insensitively.
+**Implied volatility (European only)**
+```json
+{
+  "type": "CALL",
+  "spot": 100, "strike": 100, "rate": 0.05, "timeToExpiry": 1.0,
+  "marketPrice": 10.45
+}
+```
+
+`simulations` is optional on every Monte Carlo / LSM endpoint; omit it to use the engine default (100 000 for path-dependent, 50 000 for American, 25 000 for American Greeks via LSM). `type` accepts `"CALL"` or `"PUT"` case-insensitively. `dividends` is optional on every endpoint.
 
 ### CORS
 
@@ -217,11 +293,37 @@ curl -s -X POST -H "Content-Type: application/json" \
      http://localhost:8080/price/european
 # → {"price":10.450575619322287}
 
+# Same call with a 3% continuous dividend yield
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "dividends":{"continuousYield":0.03}}' \
+     http://localhost:8080/price/european
+# → {"price":8.652526401581632}
+
+# European Greeks
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0}' \
+     http://localhost:8080/greeks/european
+# → {"price":10.45,"greeks":{"delta":0.6368,"gamma":0.0188,"vega":0.3752,"theta":-0.0176,"rho":0.5323}}
+
+# Implied volatility solver
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"timeToExpiry":1.0,"marketPrice":10.45}' \
+     http://localhost:8080/implied-vol/european
+# → {"impliedVolatility":0.1999847,"price":10.45000}
+
 # American put (LSM)
 curl -s -X POST -H "Content-Type: application/json" \
      -d '{"type":"PUT","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,"exerciseDates":50}' \
      http://localhost:8080/price/american
 # → {"price":~6.03}
+
+# Asian arithmetic call with two discrete dividends
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "timeSteps":252,"discreteMonitoring":true,"arithmeticAverage":true,
+          "dividends":{"discrete":[{"time":0.25,"amount":1},{"time":0.75,"amount":1}]}}' \
+     http://localhost:8080/price/asian
 ```
 
 ## Tech Stack
@@ -242,24 +344,24 @@ curl -s -X POST -H "Content-Type: application/json" \
 - Time steps must be `≥ 2`
 - Barrier level must be positive
 - American exercise dates must be `≥ 2`
+- Continuous dividend yield in `[0, 1)`
+- Discrete dividend times must be positive; amounts must be non-negative
+- `spot − PV(discrete dividends)` must remain positive
+- For implied-vol: market price must lie within the no-arbitrage band
 
 ## Current Limitations
 
-- No Greeks output yet
-- No implied volatility solver
-- No dividends
-- No payoff diagram (the chart shows the option-value percentile bands instead)
+- Implied volatility solver is European-only (closed-form basis); MC / LSM IV would require iterating a slow pricer
+- Discrete-dividend handling in BS uses the escrowed model — exact for the standard convention, but not the only valid approach
 - No model alternatives beyond Black–Scholes / GBM Monte Carlo (e.g. no Heston, Binomial, PDE)
+- No API authentication — bind to localhost or front with a reverse proxy in any non-trivial deployment
 
 ## Roadmap
 
 Possible future improvements:
 
-- add Greeks (delta, gamma, vega, theta, rho)
-- add implied volatility solver
-- support continuous and discrete dividends
-- add payoff diagrams
 - add more pricing models (Binomial, Heston, finite-difference PDE)
+- volatility surface fitter (term structure + skew)
 - batch-pricing endpoint on the API
 - API authentication for non-local deployments
 

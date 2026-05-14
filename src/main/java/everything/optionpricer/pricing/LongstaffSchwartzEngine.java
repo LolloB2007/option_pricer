@@ -1,8 +1,10 @@
 package everything.optionpricer.pricing;
 
 import everything.optionpricer.model.AmericanOption;
+import everything.optionpricer.model.DividendSchedule;
 import everything.optionpricer.model.PricingResult;
 
+import java.util.SplittableRandom;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.IntStream;
 
@@ -34,24 +36,63 @@ public final class LongstaffSchwartzEngine {
 
     public static PricingResult price(AmericanOption option, double spot,
                                       double riskFreeRate, double volatility) {
-        return price(option, spot, riskFreeRate, volatility, DEFAULT_PATHS);
+        return price(option, spot, riskFreeRate, volatility, DEFAULT_PATHS, DividendSchedule.NONE);
     }
-
 
     public static PricingResult price(AmericanOption option, double spot,
                                       double riskFreeRate, double volatility, int paths) {
+        return price(option, spot, riskFreeRate, volatility, paths, DividendSchedule.NONE);
+    }
+
+    public static PricingResult price(AmericanOption option, double spot,
+                                      double riskFreeRate, double volatility,
+                                      DividendSchedule dividends) {
+        return price(option, spot, riskFreeRate, volatility, DEFAULT_PATHS, dividends);
+    }
+
+    public static PricingResult price(AmericanOption option, double spot,
+                                      double riskFreeRate, double volatility,
+                                      int paths, DividendSchedule dividends) {
+        return runLsm(option, spot, riskFreeRate, volatility, paths, dividends, /*seed*/ null);
+    }
+
+
+    /**
+     * Seeded LSM pricing — every call with the same seed uses the exact same
+     * Brownian paths. Required for common-random-numbers Greeks.
+     */
+    public static PricingResult priceSeeded(AmericanOption option, double spot,
+                                            double riskFreeRate, double volatility,
+                                            int paths, long seed) {
+        return runLsm(option, spot, riskFreeRate, volatility, paths, DividendSchedule.NONE, seed);
+    }
+
+    public static PricingResult priceSeeded(AmericanOption option, double spot,
+                                            double riskFreeRate, double volatility,
+                                            int paths, long seed, DividendSchedule dividends) {
+        return runLsm(option, spot, riskFreeRate, volatility, paths, dividends, seed);
+    }
+
+
+    private static PricingResult runLsm(AmericanOption option, double spot,
+                                        double riskFreeRate, double volatility,
+                                        int paths, DividendSchedule dividends, Long seed) {
 
         validateInputs(option, spot, riskFreeRate, volatility, paths);
+        if(dividends == null) dividends = DividendSchedule.NONE;
 
         final int N = option.getExerciseDates();
         final double T = option.getTimeToExpiry();
         final double K = option.getStrikePrice();
         final int sign = option.getSign();
+        final double q = dividends.continuousYield();
 
         final double dt    = T / (N - 1);
-        final double drift = (riskFreeRate - 0.5 * volatility * volatility) * dt;
+        final double drift = (riskFreeRate - q - 0.5 * volatility * volatility) * dt;
         final double diff  = volatility * Math.sqrt(dt);
         final double discountStep = Math.exp(-riskFreeRate * dt);
+
+        final double[] stepDivs = dividends.stepwiseAmounts(dt, N);
 
         // Round up to an even path count for antithetic pairing.
         final int pairs = (paths + 1) / 2;
@@ -67,7 +108,8 @@ public final class LongstaffSchwartzEngine {
             int start = t * batchSize;
             int end   = Math.min(pairs, start + batchSize);
             if(start >= end) return;
-            simulatePaths(S, start, end, spot, drift, diff, N);
+            if(seed == null) simulatePaths(S, start, end, spot, drift, diff, N, stepDivs);
+            else             simulatePathsSeeded(S, start, end, spot, drift, diff, N, stepDivs, seed);
         });
 
         // Backward induction: choose exercise time per path.
@@ -135,8 +177,12 @@ public final class LongstaffSchwartzEngine {
     }
 
 
+    private static final double MIN_PRICE = 1e-9;
+
+
     private static void simulatePaths(double[][] S, int pairStart, int pairEnd,
-                                      double spot, double drift, double diff, int N) {
+                                      double spot, double drift, double diff, int N,
+                                      double[] stepDivs) {
 
         ThreadLocalRandom rng = ThreadLocalRandom.current();
 
@@ -155,8 +201,53 @@ public final class LongstaffSchwartzEngine {
                 double dz = diff * z;
                 logPos += drift + dz;
                 logNeg += drift - dz;
-                S[posIdx][j] = Math.exp(logPos);
-                S[negIdx][j] = Math.exp(logNeg);
+                double sPos = Math.exp(logPos);
+                double sNeg = Math.exp(logNeg);
+                if(stepDivs[j] != 0.0) {
+                    sPos -= stepDivs[j]; if(sPos < MIN_PRICE) sPos = MIN_PRICE;
+                    sNeg -= stepDivs[j]; if(sNeg < MIN_PRICE) sNeg = MIN_PRICE;
+                    logPos = Math.log(sPos);
+                    logNeg = Math.log(sNeg);
+                }
+                S[posIdx][j] = sPos;
+                S[negIdx][j] = sNeg;
+            }
+        }
+    }
+
+
+    private static void simulatePathsSeeded(double[][] S, int pairStart, int pairEnd,
+                                            double spot, double drift, double diff, int N,
+                                            double[] stepDivs, long seed) {
+        for(int p = pairStart; p < pairEnd; p++) {
+            int posIdx = 2 * p;
+            int negIdx = 2 * p + 1;
+
+            // Per-pair deterministic RNG. Same (seed, pairIndex) always
+            // produces the same z sequence — enables CRN finite differences.
+            SplittableRandom rng = new SplittableRandom(MonteCarloEngine.mixSeed(seed, p));
+
+            S[posIdx][0] = spot;
+            S[negIdx][0] = spot;
+
+            double logPos = Math.log(spot);
+            double logNeg = logPos;
+
+            for(int j = 1; j < N; j++) {
+                double z = rng.nextGaussian();
+                double dz = diff * z;
+                logPos += drift + dz;
+                logNeg += drift - dz;
+                double sPos = Math.exp(logPos);
+                double sNeg = Math.exp(logNeg);
+                if(stepDivs[j] != 0.0) {
+                    sPos -= stepDivs[j]; if(sPos < MIN_PRICE) sPos = MIN_PRICE;
+                    sNeg -= stepDivs[j]; if(sNeg < MIN_PRICE) sNeg = MIN_PRICE;
+                    logPos = Math.log(sPos);
+                    logNeg = Math.log(sNeg);
+                }
+                S[posIdx][j] = sPos;
+                S[negIdx][j] = sNeg;
             }
         }
     }

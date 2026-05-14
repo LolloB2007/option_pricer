@@ -4,9 +4,14 @@ import com.formdev.flatlaf.FlatClientProperties;
 import everything.optionpricer.model.AmericanOption;
 import everything.optionpricer.model.AsianOption;
 import everything.optionpricer.model.BarrierOption;
+import everything.optionpricer.model.DividendSchedule;
 import everything.optionpricer.model.LookbackOption;
+import everything.optionpricer.model.Option;
 import everything.optionpricer.model.OptionType;
+import everything.optionpricer.model.PathDependentOption;
 import everything.optionpricer.model.PricingResult;
+import everything.optionpricer.pricing.Greeks;
+import everything.optionpricer.pricing.GreeksCalculator;
 import everything.optionpricer.pricing.LongstaffSchwartzEngine;
 import everything.optionpricer.pricing.MonteCarloEngine;
 
@@ -18,7 +23,8 @@ import net.miginfocom.swing.MigLayout;
 
 /**
  * Monte Carlo pricing page — Asian, Barrier, Lookback (path-dependent MC)
- * plus American (Longstaff–Schwartz).
+ * plus American (Longstaff–Schwartz). Includes Greeks via CRN finite
+ * differences and a payoff diagram.
  *
  * @author lorenzobarbagelata
  */
@@ -31,28 +37,15 @@ public class MonteCarloPanel extends JPanel {
     private static final String CARD_LOOKBACK = "LOOKBACK";
     private static final String CARD_AMERICAN = "AMERICAN";
 
-    // Common inputs
     private JComboBox<OptionType> optionTypeCombo;
-    private JTextField spotField, strikeField, rateField, volField, timeField, stepsField;
+    private JTextField spotField, strikeField, rateField, volField, timeField, stepsField, divYieldField;
 
-    // Method picker (segmented)
     private JToggleButton segAsian, segBarrier, segLookback, segAmerican;
 
-    // Asian-specific
-    private JComboBox<String> asianAverageCombo;
-    private JComboBox<String> asianMonitoringCombo;
-
-    // Barrier-specific
+    private JComboBox<String> asianAverageCombo, asianMonitoringCombo;
     private JTextField barrierField;
-    private JComboBox<String> barrierDirCombo;
-    private JComboBox<String> barrierInOutCombo;
-    private JComboBox<String> barrierMonitoringCombo;
-
-    // Lookback-specific
-    private JComboBox<String> lookbackStrikeCombo;
-    private JComboBox<String> lookbackMonitoringCombo;
-
-    // American-specific
+    private JComboBox<String> barrierDirCombo, barrierInOutCombo, barrierMonitoringCombo;
+    private JComboBox<String> lookbackStrikeCombo, lookbackMonitoringCombo;
     private JTextField americanExerciseField;
 
     private CardLayout cardLayout;
@@ -60,41 +53,45 @@ public class MonteCarloPanel extends JPanel {
 
     private JButton priceButton;
     private ResultPill resultLabel;
-    private QuantileChartPanel chart;
+    private GreeksPanel greeksPanel;
+    private QuantileChartPanel quantileChart;
+    private PayoffDiagramPanel payoffChart;
 
 
     public MonteCarloPanel() {
         setLayout(new MigLayout(
                 "fillx, insets 24 28 24 28",
                 "[grow, fill]",
-                "[]14[]14[]14[]10[]10[]14[]"
+                "[]14[]14[]14[]10[]10[]8[]14[]10[]"
         ));
         componentInit();
 
         add(Theme.title("Monte Carlo"), "wrap");
         add(Theme.subtitle("Path-dependent and American options"), "wrap, gapbottom 4");
 
-        add(buildSegmented(), "growx, wrap");
+        add(buildSegmented(),    "growx, wrap");
         add(buildCommonInputs(), "growx, wrap");
-        add(cardPanel, "growx, wrap");
+        add(cardPanel,           "growx, wrap");
 
-        add(priceButton, "alignx center, wrap, gaptop 2");
-        add(resultLabel, "alignx center, wrap, gaptop 2");
-        add(chart, "grow, push, gaptop 8");
+        add(priceButton,   "alignx center, wrap, gaptop 2");
+        add(resultLabel,   "alignx center, wrap, gaptop 2");
+        add(greeksPanel,   "growx, wrap, gaptop 2");
+        add(quantileChart, "grow, push, gaptop 8");
+        add(payoffChart,   "grow, push, gaptop 8");
     }
 
 
     private void componentInit() {
         optionTypeCombo = new JComboBox<>(OptionType.values());
 
-        spotField   = field("100");
-        strikeField = field("100");
-        rateField   = field("0.05");
-        volField    = field("0.20");
-        timeField   = field("1.00");
-        stepsField  = field("252");
+        spotField     = field("100");
+        strikeField   = field("100");
+        rateField     = field("0.05");
+        volField      = field("0.20");
+        timeField     = field("1.00");
+        stepsField    = field("252");
+        divYieldField = field("0.00");
 
-        // Segmented method picker
         ButtonGroup grp = new ButtonGroup();
         segAsian    = makeSegment("Asian",    grp, CARD_ASIAN);
         segBarrier  = makeSegment("Barrier",  grp, CARD_BARRIER);
@@ -127,8 +124,10 @@ public class MonteCarloPanel extends JPanel {
         Theme.stylePrimary(priceButton);
         priceButton.addActionListener(e -> onPrice());
 
-        resultLabel = new ResultPill();
-        chart       = new QuantileChartPanel();
+        resultLabel   = new ResultPill();
+        greeksPanel   = new GreeksPanel();
+        quantileChart = new QuantileChartPanel();
+        payoffChart   = new PayoffDiagramPanel();
     }
 
 
@@ -156,49 +155,40 @@ public class MonteCarloPanel extends JPanel {
         Card card = new Card(new MigLayout(
                 "fillx, insets 0",
                 "[120!][grow, fill][20!][120!][grow, fill]",
-                "[]10[]10[]10[]"
+                "[]10[]10[]10[]10[]"
         ));
         card.add(Theme.formLabel("Option type")); card.add(optionTypeCombo);
-        card.add(new JLabel());                   card.add(Theme.formLabel("Time steps"));   card.add(stepsField,   "wrap");
+        card.add(new JLabel());                   card.add(Theme.formLabel("Time steps"));     card.add(stepsField,   "wrap");
         card.add(Theme.formLabel("Spot (S)"));    card.add(spotField);
-        card.add(new JLabel());                   card.add(Theme.formLabel("Strike (K)"));   card.add(strikeField,  "wrap");
+        card.add(new JLabel());                   card.add(Theme.formLabel("Strike (K)"));     card.add(strikeField,  "wrap");
         card.add(Theme.formLabel("Rate (r)"));    card.add(rateField);
-        card.add(new JLabel());                   card.add(Theme.formLabel("Volatility (σ)")); card.add(volField,    "wrap");
-        card.add(Theme.formLabel("Time (T, yrs)")); card.add(timeField, "span 4, wrap");
+        card.add(new JLabel());                   card.add(Theme.formLabel("Volatility (σ)")); card.add(volField,     "wrap");
+        card.add(Theme.formLabel("Time (T, yrs)")); card.add(timeField);
+        card.add(new JLabel());                   card.add(Theme.formLabel("Div yield (q)"));  card.add(divYieldField, "wrap");
         return card;
     }
 
-
     private Card buildAsianCard() {
-        Card card = new Card(new MigLayout(
-                "fillx, insets 0",
-                "[120!][grow, fill][20!][120!][grow, fill]",
-                "[]10[]"
-        ));
+        Card card = new Card(new MigLayout("fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]", "[]10[]"));
         card.add(Theme.formLabel("Average"));    card.add(asianAverageCombo);
         card.add(new JLabel());                  card.add(Theme.formLabel("Monitoring")); card.add(asianMonitoringCombo, "wrap");
         return card;
     }
 
     private Card buildBarrierCard() {
-        Card card = new Card(new MigLayout(
-                "fillx, insets 0",
-                "[120!][grow, fill][20!][120!][grow, fill]",
-                "[]10[]10[]"
-        ));
+        Card card = new Card(new MigLayout("fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]", "[]10[]10[]"));
         card.add(Theme.formLabel("Barrier (B)")); card.add(barrierField);
-        card.add(new JLabel());                   card.add(Theme.formLabel("Direction"));  card.add(barrierDirCombo,   "wrap");
+        card.add(new JLabel());                   card.add(Theme.formLabel("Direction"));  card.add(barrierDirCombo,        "wrap");
         card.add(Theme.formLabel("In / Out"));    card.add(barrierInOutCombo);
         card.add(new JLabel());                   card.add(Theme.formLabel("Monitoring")); card.add(barrierMonitoringCombo, "wrap");
         return card;
     }
 
     private Card buildLookbackCard() {
-        Card card = new Card(new MigLayout(
-                "fillx, insets 0",
-                "[120!][grow, fill][20!][120!][grow, fill]",
-                "[]"
-        ));
+        Card card = new Card(new MigLayout("fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]", "[]"));
         card.add(Theme.formLabel("Strike type")); card.add(lookbackStrikeCombo);
         card.add(new JLabel());                   card.add(Theme.formLabel("Monitoring")); card.add(lookbackMonitoringCombo, "wrap");
         return card;
@@ -229,17 +219,20 @@ public class MonteCarloPanel extends JPanel {
 
     private void onPrice() {
         resultLabel.setVisible(false);
-        chart.clear();
+        greeksPanel.clear();
+        quantileChart.clear();
+        payoffChart.clear();
 
-        double spot, strike, rate, vol, time;
+        double spot, strike, rate, vol, time, divYield;
         int steps;
         try {
-            spot   = Double.parseDouble(spotField.getText().trim());
-            strike = Double.parseDouble(strikeField.getText().trim());
-            rate   = Double.parseDouble(rateField.getText().trim());
-            vol    = Double.parseDouble(volField.getText().trim());
-            time   = Double.parseDouble(timeField.getText().trim());
-            steps  = Integer.parseInt(stepsField.getText().trim());
+            spot     = Double.parseDouble(spotField.getText().trim());
+            strike   = Double.parseDouble(strikeField.getText().trim());
+            rate     = Double.parseDouble(rateField.getText().trim());
+            vol      = Double.parseDouble(volField.getText().trim());
+            time     = Double.parseDouble(timeField.getText().trim());
+            steps    = Integer.parseInt(stepsField.getText().trim());
+            divYield = parseDoubleOrZero(divYieldField.getText());
         } catch(NumberFormatException ex) {
             showResult(INVALID_INPUT_MSG);
             return;
@@ -247,61 +240,114 @@ public class MonteCarloPanel extends JPanel {
 
         if(spot <= 0 || strike <= 0 || time <= 0 || steps < 2
                 || rate <= -0.2 || rate >= 1.0
-                || vol  <=  0.0 || vol  >= 5.0) {
+                || vol  <=  0.0 || vol  >= 5.0
+                || divYield < 0  || divYield >= 1.0) {
             showResult(INVALID_INPUT_MSG);
             return;
         }
 
         OptionType type = (OptionType) optionTypeCombo.getSelectedItem();
-        chart.setInputs(spot, strike, rate, vol, time, type);
+        DividendSchedule divs = divYield == 0.0
+                ? DividendSchedule.NONE
+                : DividendSchedule.continuous(divYield);
+
+        quantileChart.setInputs(spot, strike, rate, vol, time, type);
+        payoffChart.setInputs(spot, strike, rate, vol, time, type);
 
         try {
             PricingResult result;
+            Option pricedOption;
             switch(currentMethod()) {
-                case "Asian":    result = priceAsian(type, strike, time, steps, spot, rate, vol);    break;
-                case "Barrier":  result = priceBarrier(type, strike, time, steps, spot, rate, vol);  break;
-                case "Lookback": result = priceLookback(type, strike, time, steps, spot, rate, vol); break;
-                case "American": result = priceAmerican(type, strike, time, spot, rate, vol);        break;
+                case "Asian": {
+                    PathDependentOption opt = buildAsian(type, strike, time, steps);
+                    result = MonteCarloEngine.price(opt, spot, rate, vol, divs);
+                    pricedOption = opt;
+                    break;
+                }
+                case "Barrier": {
+                    PathDependentOption opt = buildBarrier(type, strike, time, steps);
+                    result = MonteCarloEngine.price(opt, spot, rate, vol, divs);
+                    pricedOption = opt;
+                    break;
+                }
+                case "Lookback": {
+                    PathDependentOption opt = buildLookback(type, strike, time, steps);
+                    result = MonteCarloEngine.price(opt, spot, rate, vol, divs);
+                    pricedOption = opt;
+                    break;
+                }
+                case "American": {
+                    AmericanOption opt = buildAmerican(type, strike, time);
+                    result = LongstaffSchwartzEngine.price(opt, spot, rate, vol, divs);
+                    pricedOption = opt;
+                    break;
+                }
                 default: throw new IllegalStateException("unknown method");
             }
             showResult(result.toString());
+            computeGreeksAsync(pricedOption, spot, rate, vol, divs);
         } catch(IllegalArgumentException ex) {
             showResult(INVALID_INPUT_MSG);
         }
     }
 
 
-    private PricingResult priceAsian(OptionType type, double strike, double time, int steps,
-                                     double spot, double rate, double vol) {
+    /**
+     * MC Greeks need 8 re-prices — run them off the EDT so the UI stays
+     * responsive. Show "…" placeholders while computing.
+     */
+    private void computeGreeksAsync(Option option, double spot, double rate, double vol,
+                                    DividendSchedule dividends) {
+        greeksPanel.setComputing();
+        priceButton.setEnabled(false);
+
+        new SwingWorker<Greeks, Void>() {
+            @Override protected Greeks doInBackground() {
+                return GreeksCalculator.compute(option, spot, rate, vol, dividends);
+            }
+            @Override protected void done() {
+                priceButton.setEnabled(true);
+                try {
+                    greeksPanel.setGreeks(get());
+                } catch(Exception e) {
+                    greeksPanel.clear();
+                }
+            }
+        }.execute();
+    }
+
+
+    private static double parseDoubleOrZero(String s) {
+        if(s == null) return 0.0;
+        String t = s.trim();
+        if(t.isEmpty()) return 0.0;
+        return Double.parseDouble(t);
+    }
+
+
+    private AsianOption buildAsian(OptionType type, double strike, double time, int steps) {
         boolean discrete = "Discrete".equals(asianMonitoringCombo.getSelectedItem());
         boolean arithmetic = "Arithmetic".equals(asianAverageCombo.getSelectedItem());
-        AsianOption opt = new AsianOption(strike, time, type, steps, discrete, arithmetic);
-        return MonteCarloEngine.price(opt, spot, rate, vol);
+        return new AsianOption(strike, time, type, steps, discrete, arithmetic);
     }
 
-    private PricingResult priceBarrier(OptionType type, double strike, double time, int steps,
-                                       double spot, double rate, double vol) {
-        double barrier  = Double.parseDouble(barrierField.getText().trim());
-        boolean up      = "Up".equals(barrierDirCombo.getSelectedItem());
-        boolean in      = "In".equals(barrierInOutCombo.getSelectedItem());
+    private BarrierOption buildBarrier(OptionType type, double strike, double time, int steps) {
+        double barrier   = Double.parseDouble(barrierField.getText().trim());
+        boolean up       = "Up".equals(barrierDirCombo.getSelectedItem());
+        boolean in       = "In".equals(barrierInOutCombo.getSelectedItem());
         boolean discrete = "Discrete".equals(barrierMonitoringCombo.getSelectedItem());
-        BarrierOption opt = new BarrierOption(strike, time, type, steps, discrete, barrier, up, in);
-        return MonteCarloEngine.price(opt, spot, rate, vol);
+        return new BarrierOption(strike, time, type, steps, discrete, barrier, up, in);
     }
 
-    private PricingResult priceLookback(OptionType type, double strike, double time, int steps,
-                                        double spot, double rate, double vol) {
+    private LookbackOption buildLookback(OptionType type, double strike, double time, int steps) {
         boolean fixedStrike = "Fixed strike".equals(lookbackStrikeCombo.getSelectedItem());
         boolean discrete    = "Discrete".equals(lookbackMonitoringCombo.getSelectedItem());
-        LookbackOption opt = new LookbackOption(strike, time, type, steps, discrete, fixedStrike);
-        return MonteCarloEngine.price(opt, spot, rate, vol);
+        return new LookbackOption(strike, time, type, steps, discrete, fixedStrike);
     }
 
-    private PricingResult priceAmerican(OptionType type, double strike, double time,
-                                        double spot, double rate, double vol) {
+    private AmericanOption buildAmerican(OptionType type, double strike, double time) {
         int dates = Integer.parseInt(americanExerciseField.getText().trim());
-        AmericanOption opt = new AmericanOption(strike, time, type, dates);
-        return LongstaffSchwartzEngine.price(opt, spot, rate, vol);
+        return new AmericanOption(strike, time, type, dates);
     }
 
 
