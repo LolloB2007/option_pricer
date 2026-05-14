@@ -96,6 +96,30 @@ public final class ApiServer {
             double rate, double timeToExpiry, double marketPrice,
             DividendsDto dividends) {}
 
+    public record ImpliedVolAsianRequest(
+            String type, double spot, double strike,
+            double rate, double timeToExpiry, double marketPrice,
+            int timeSteps, boolean discreteMonitoring, boolean arithmeticAverage,
+            Integer simulations, DividendsDto dividends) {}
+
+    public record ImpliedVolBarrierRequest(
+            String type, double spot, double strike,
+            double rate, double timeToExpiry, double marketPrice,
+            int timeSteps, boolean discreteMonitoring,
+            double barrier, boolean upBarrier, boolean inBarrier,
+            Integer simulations, DividendsDto dividends) {}
+
+    public record ImpliedVolLookbackRequest(
+            String type, double spot, double strike,
+            double rate, double timeToExpiry, double marketPrice,
+            int timeSteps, boolean discreteMonitoring, boolean fixedStrike,
+            Integer simulations, DividendsDto dividends) {}
+
+    public record ImpliedVolAmericanRequest(
+            String type, double spot, double strike,
+            double rate, double timeToExpiry, double marketPrice,
+            int exerciseDates, Integer simulations, DividendsDto dividends) {}
+
     /**
      * Dividend specification — both fields optional. Continuous yield in
      * decimal (3% = 0.03). Discrete dividends as a list of {time, amount}.
@@ -135,6 +159,10 @@ public final class ApiServer {
         server.createContext("/greeks/lookback", wrap(ApiServer::greeksLookback,   true));
         server.createContext("/greeks/american", wrap(ApiServer::greeksAmerican,   true));
         server.createContext("/implied-vol/european", wrap(ApiServer::impliedVolEuropean, true));
+        server.createContext("/implied-vol/asian",    wrap(ApiServer::impliedVolAsian,    true));
+        server.createContext("/implied-vol/barrier",  wrap(ApiServer::impliedVolBarrier,  true));
+        server.createContext("/implied-vol/lookback", wrap(ApiServer::impliedVolLookback, true));
+        server.createContext("/implied-vol/american", wrap(ApiServer::impliedVolAmerican, true));
 
         int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
         server.setExecutor(Executors.newFixedThreadPool(threads));
@@ -373,6 +401,58 @@ public final class ApiServer {
         DividendSchedule divs = toSchedule(req.dividends);
         double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs);
         double pAt = BlackScholesEngine.price(opt, req.spot, req.rate, iv, divs).getPrice();
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+    }
+
+
+    private static void impliedVolAsian(HttpExchange ex) throws IOException {
+        ImpliedVolAsianRequest req = readJson(ex, ImpliedVolAsianRequest.class);
+        AsianOption opt = new AsianOption(
+                req.strike, req.timeToExpiry, parseType(req.type),
+                req.timeSteps, req.discreteMonitoring, req.arithmeticAverage);
+        DividendSchedule divs = toSchedule(req.dividends);
+        int sims = req.simulations != null ? req.simulations : ImpliedVolatility.DEFAULT_MC_SIMS;
+        double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, sims);
+        double pAt = MonteCarloEngine.price(opt, req.spot, req.rate, iv, sims, divs).getPrice();
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+    }
+
+
+    private static void impliedVolBarrier(HttpExchange ex) throws IOException {
+        ImpliedVolBarrierRequest req = readJson(ex, ImpliedVolBarrierRequest.class);
+        BarrierOption opt = new BarrierOption(
+                req.strike, req.timeToExpiry, parseType(req.type),
+                req.timeSteps, req.discreteMonitoring,
+                req.barrier, req.upBarrier, req.inBarrier);
+        DividendSchedule divs = toSchedule(req.dividends);
+        int sims = req.simulations != null ? req.simulations : ImpliedVolatility.DEFAULT_MC_SIMS;
+        double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, sims);
+        double pAt = MonteCarloEngine.price(opt, req.spot, req.rate, iv, sims, divs).getPrice();
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+    }
+
+
+    private static void impliedVolLookback(HttpExchange ex) throws IOException {
+        ImpliedVolLookbackRequest req = readJson(ex, ImpliedVolLookbackRequest.class);
+        LookbackOption opt = new LookbackOption(
+                req.strike, req.timeToExpiry, parseType(req.type),
+                req.timeSteps, req.discreteMonitoring, req.fixedStrike);
+        DividendSchedule divs = toSchedule(req.dividends);
+        int sims = req.simulations != null ? req.simulations : ImpliedVolatility.DEFAULT_MC_SIMS;
+        double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, sims);
+        double pAt = MonteCarloEngine.price(opt, req.spot, req.rate, iv, sims, divs).getPrice();
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+    }
+
+
+    private static void impliedVolAmerican(HttpExchange ex) throws IOException {
+        ImpliedVolAmericanRequest req = readJson(ex, ImpliedVolAmericanRequest.class);
+        AmericanOption opt = new AmericanOption(
+                req.strike, req.timeToExpiry, parseType(req.type), req.exerciseDates);
+        DividendSchedule divs = toSchedule(req.dividends);
+        int paths = req.simulations != null ? req.simulations : ImpliedVolatility.DEFAULT_LSM_PATHS;
+        double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, paths);
+        double pAt = LongstaffSchwartzEngine.price(opt, req.spot, req.rate, iv, paths, divs).getPrice();
         sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
     }
 

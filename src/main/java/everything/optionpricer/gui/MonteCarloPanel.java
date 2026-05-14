@@ -12,6 +12,7 @@ import everything.optionpricer.model.PathDependentOption;
 import everything.optionpricer.model.PricingResult;
 import everything.optionpricer.pricing.Greeks;
 import everything.optionpricer.pricing.GreeksCalculator;
+import everything.optionpricer.pricing.ImpliedVolatility;
 import everything.optionpricer.pricing.LongstaffSchwartzEngine;
 import everything.optionpricer.pricing.MonteCarloEngine;
 
@@ -57,6 +58,11 @@ public class MonteCarloPanel extends JPanel {
     private QuantileChartPanel quantileChart;
     private PayoffDiagramPanel payoffChart;
 
+    // Implied vol sub-section
+    private JTextField marketPriceField;
+    private JButton    solveIvButton;
+    private JLabel     ivResultLabel;
+
 
     public MonteCarloPanel() {
         setLayout(new MigLayout(
@@ -78,6 +84,7 @@ public class MonteCarloPanel extends JPanel {
         add(greeksPanel,   "growx, wrap, gaptop 2");
         add(quantileChart, "grow, push, gaptop 8");
         add(payoffChart,   "grow, push, gaptop 8");
+        add(buildIvSection(), "growx, wrap, gaptop 8");
     }
 
 
@@ -128,6 +135,27 @@ public class MonteCarloPanel extends JPanel {
         greeksPanel   = new GreeksPanel();
         quantileChart = new QuantileChartPanel();
         payoffChart   = new PayoffDiagramPanel();
+
+        marketPriceField = field("market price");
+        solveIvButton    = new JButton("Solve σ");
+        Theme.stylePrimary(solveIvButton);
+        solveIvButton.addActionListener(e -> onSolveIv());
+        ivResultLabel    = new JLabel(" ");
+        ivResultLabel.setForeground(new java.awt.Color(0xB8BCC9));
+    }
+
+
+    private Card buildIvSection() {
+        Card card = new Card(new MigLayout(
+                "fillx, insets 0",
+                "[120!][grow, fill][80!]",
+                "[]6[]"));
+        card.add(Theme.subtitle("Implied volatility from a market price"), "span 3, wrap");
+        card.add(Theme.formLabel("Market price"));
+        card.add(marketPriceField, "growx");
+        card.add(solveIvButton, "growy, wrap");
+        card.add(ivResultLabel, "span 3, growx, alignx center, gaptop 2");
+        return card;
     }
 
 
@@ -322,6 +350,68 @@ public class MonteCarloPanel extends JPanel {
         String t = s.trim();
         if(t.isEmpty()) return 0.0;
         return Double.parseDouble(t);
+    }
+
+
+    private void onSolveIv() {
+        double spot, strike, rate, time, divYield, marketPrice;
+        int steps;
+        try {
+            spot        = Double.parseDouble(spotField.getText().trim());
+            strike      = Double.parseDouble(strikeField.getText().trim());
+            rate        = Double.parseDouble(rateField.getText().trim());
+            time        = Double.parseDouble(timeField.getText().trim());
+            steps       = Integer.parseInt(stepsField.getText().trim());
+            divYield    = parseDoubleOrZero(divYieldField.getText());
+            marketPrice = Double.parseDouble(marketPriceField.getText().trim());
+        } catch(NumberFormatException ex) {
+            ivResultLabel.setForeground(new java.awt.Color(0xFB923C));
+            ivResultLabel.setText("Fill the common inputs and a numeric market price");
+            return;
+        }
+
+        OptionType type = (OptionType) optionTypeCombo.getSelectedItem();
+        DividendSchedule divs = divYield == 0.0
+                ? DividendSchedule.NONE
+                : DividendSchedule.continuous(divYield);
+
+        Option option;
+        try {
+            option = switch(currentMethod()) {
+                case "Asian"    -> buildAsian(type, strike, time, steps);
+                case "Barrier"  -> buildBarrier(type, strike, time, steps);
+                case "Lookback" -> buildLookback(type, strike, time, steps);
+                case "American" -> buildAmerican(type, strike, time);
+                default         -> throw new IllegalStateException("unknown method");
+            };
+        } catch(IllegalArgumentException ex) {
+            ivResultLabel.setForeground(new java.awt.Color(0xFB923C));
+            ivResultLabel.setText("Invalid inputs for " + currentMethod());
+            return;
+        }
+
+        // MC IV is slow (1-2s) — run off the EDT.
+        ivResultLabel.setForeground(new java.awt.Color(0x9094A8));
+        ivResultLabel.setText("Solving σ …");
+        solveIvButton.setEnabled(false);
+
+        new SwingWorker<Double, Void>() {
+            @Override protected Double doInBackground() {
+                return ImpliedVolatility.impliedVolatility(option, spot, rate, marketPrice, divs);
+            }
+            @Override protected void done() {
+                solveIvButton.setEnabled(true);
+                try {
+                    double iv = get();
+                    ivResultLabel.setForeground(new java.awt.Color(0xB8BCC9));
+                    ivResultLabel.setText(String.format("Implied σ = %.4f  (%.2f%%)", iv, iv * 100.0));
+                } catch(Exception ex) {
+                    Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                    ivResultLabel.setForeground(new java.awt.Color(0xFB923C));
+                    ivResultLabel.setText(cause.getMessage() != null ? cause.getMessage() : "Failed");
+                }
+            }
+        }.execute();
     }
 
 

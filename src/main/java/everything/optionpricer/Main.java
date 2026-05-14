@@ -48,8 +48,11 @@ public class Main {
 
         SwingUtilities.invokeLater(() -> {
             MainFrame main = new MainFrame();
+            // Restored (non-maximized) size if the user un-maximizes.
             main.setSize(660, 1040);
             main.setLocationRelativeTo(null);
+            // Default to a full-screen / maximized window.
+            main.setExtendedState(javax.swing.JFrame.MAXIMIZED_BOTH);
             main.setVisible(true);
         });
     }
