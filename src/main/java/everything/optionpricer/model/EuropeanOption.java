@@ -1,43 +1,28 @@
 package everything.optionpricer.model;
 
-import static everything.optionpricer.model.OptionType.*;
+import static everything.optionpricer.model.OptionType.CALL;
+import static everything.optionpricer.model.OptionType.PUT;
+
 
 /**
- * implementation of European options
+ * European option (no early exercise, terminal payoff only).
  * @author lorenzobarbagelata
  */
 public class EuropeanOption extends Option {
-    
-    
-    /**
-     * Constructor. Needed for static generation methods
-     * @param sP
-     * @param tE
-     * @param type 
-     */
-    private EuropeanOption(double sP, double tE, OptionType type) {
-        super(sP, tE, type);
+
+    private EuropeanOption(double strikePrice, double timeToExpiry, OptionType type) {
+        super(strikePrice, timeToExpiry, type);
     }
-    
-    
-    /**
-     * Creates call option taking strike price and time to expiry in years
-     * @param sP
-     * @param tE
-     * @return Option
-     */
-    public static EuropeanOption call(double sP, double tE) {
-        return new EuropeanOption(sP, tE, CALL);
+
+    public static EuropeanOption call(double strikePrice, double timeToExpiry) {
+        return new EuropeanOption(strikePrice, timeToExpiry, CALL);
     }
-    
-    
-    /**
-     * Creates put option taking strike price and time to expiry in years
-     * @param sP
-     * @param tE
-     * @return Option
-     */
-    public static EuropeanOption put(double sP, double tE) {
-        return new EuropeanOption(sP, tE, PUT);
+
+    public static EuropeanOption put(double strikePrice, double timeToExpiry) {
+        return new EuropeanOption(strikePrice, timeToExpiry, PUT);
+    }
+
+    public static EuropeanOption of(OptionType type, double strikePrice, double timeToExpiry) {
+        return new EuropeanOption(strikePrice, timeToExpiry, type);
     }
 }

@@ -1,235 +1,135 @@
 package everything.optionpricer.gui;
 
-import everything.optionpricer.model.*;
+import everything.optionpricer.model.EuropeanOption;
+import everything.optionpricer.model.OptionType;
+import everything.optionpricer.model.PricingResult;
 import everything.optionpricer.pricing.BlackScholesEngine;
+
 import javax.swing.*;
 import net.miginfocom.swing.MigLayout;
 
 
 /**
- * special case of JFrame. Entry point of gui
+ * Main application window.
  * @author lorenzobarbagelata
  */
 public class MainFrame extends JFrame {
-    
-    private JPanel MainPanel;
-    
-    private JComboBox optionTypeCombo;
+
+    private static final String INVALID_INPUT_MSG = "Please enter valid values in inputs";
+
+    private final JPanel mainPanel;
+
+    private JComboBox<OptionType> optionTypeCombo;
     private JTextField spotField;
     private JTextField strikeField;
     private JTextField rateField;
     private JTextField volField;
     private JTextField timeField;
-    
+
     private JButton priceButton;
     private JLabel resultLabel;
-    
-    
-    /**
-     * Constructor for MainFrame
-     */
+
+
     public MainFrame() {
-        MainPanel = new JPanel(new MigLayout(
+        mainPanel = new JPanel(new MigLayout(
                 "fillx, insets 20",
                 "[right]12[grow, fill]",
                 "[]10[]10[]10[]10[]10[]10[]20[]"
         ));
-        
+
         componentInit();
-        
-        MainPanel.add(new JLabel("Enter % as decimals (6% = 0.06) and time in years", SwingConstants.CENTER), "span2, growx, alignxcenter, wrap");
-        
-        MainPanel.add(new JLabel("Option Type:"));
-        MainPanel.add(optionTypeCombo, "wrap");
 
-        MainPanel.add(new JLabel("Spot Price (S):"));
-        MainPanel.add(spotField, "wrap");
+        mainPanel.add(new JLabel("Enter % as decimals (6% = 0.06) and time in years", SwingConstants.CENTER),
+                "span2, growx, alignxcenter, wrap");
 
-        MainPanel.add(new JLabel("Strike Price (K):"));
-        MainPanel.add(strikeField, "wrap");
+        mainPanel.add(new JLabel("Option Type:"));
+        mainPanel.add(optionTypeCombo, "wrap");
 
-        MainPanel.add(new JLabel("Risk-Free Rate (r)"));
-        MainPanel.add(rateField, "wrap");
+        mainPanel.add(new JLabel("Spot Price (S):"));
+        mainPanel.add(spotField, "wrap");
 
-        MainPanel.add(new JLabel("Volatility (σ)"));
-        MainPanel.add(volField, "wrap");
+        mainPanel.add(new JLabel("Strike Price (K):"));
+        mainPanel.add(strikeField, "wrap");
 
-        MainPanel.add(new JLabel("Time to Expiry (T):"));
-        MainPanel.add(timeField, "wrap");
+        mainPanel.add(new JLabel("Risk-Free Rate (r):"));
+        mainPanel.add(rateField, "wrap");
 
-        MainPanel.add(priceButton, "span 2, center, wrap");
-        MainPanel.add(resultLabel, "span 2, growx, alignx center");
-        
-        this.add(MainPanel);
+        mainPanel.add(new JLabel("Volatility (σ):"));
+        mainPanel.add(volField, "wrap");
+
+        mainPanel.add(new JLabel("Time to Expiry (T):"));
+        mainPanel.add(timeField, "wrap");
+
+        mainPanel.add(priceButton, "span 2, center, wrap");
+        mainPanel.add(resultLabel, "span 2, growx, alignx center");
+
+        add(mainPanel);
     }
-    
-    
-    /**
-     * Method that initialises all components of MainFrame
-     */
+
+
     private void componentInit() {
-        optionTypeInit();
-        spotFieldInit();
-        strikeFieldInit();
-        rateFieldInit();
-        volFieldInit();
-        timeFieldInit();
-        priceButtonInit();
-        resultLabelInit();
-    }
-    
-    
-    /**
-     * Initialises optionType JComboBox
-     */
-    private void optionTypeInit() {
-        String[] options = {"Call", "Put"};
-        optionTypeCombo = new JComboBox(options);
-        optionTypeCombo.setVisible(true);
-    }
-    
-    
-    /**
-     * Initialises spotField JTextField
-     */
-    private void spotFieldInit() {
-        spotField = new JTextField(8);
-        spotField.setVisible(true);
-    }
-    
-    
-    /**
-     * Initialises strikeField JTextField
-     */
-    private void strikeFieldInit() {
+        optionTypeCombo = new JComboBox<>(OptionType.values());
+
+        spotField   = new JTextField(8);
         strikeField = new JTextField(8);
-        strikeField.setVisible(true);
-    }
-    
-    
-    /**
-     * Initialises rateField JTextField
-     */
-    private void rateFieldInit() {
-        rateField = new JTextField(8);
-        rateField.setVisible(true);
-    }
-    
-    
-    /**
-     * Initialises volField JTextField
-     */
-    private void volFieldInit() {
-        volField = new JTextField(8);
-        volField.setVisible(true);
-    }
-    
-    
-    /**
-     * Initialises timeField JTextField
-     */
-    private void timeFieldInit() {
-        timeField = new JTextField(8);
-        timeField.setVisible(true);
-    }
-    
-    
-    /**
-     * Initialises priceButton JButton
-     */
-    private void priceButtonInit() {
+        rateField   = new JTextField(8);
+        volField    = new JTextField(8);
+        timeField   = new JTextField(8);
+
         priceButton = new JButton("Price option");
-        priceButton.setVisible(true);
-        
-        priceButton.addActionListener(e -> {
-            onButtonClick();
-        });
-    }
-    
-    
-    /**
-     * Initialises resultLabel JLabel and sets its visibility to false
-     */
-    private void resultLabelInit() {
+        priceButton.addActionListener(e -> onButtonClick());
+
         resultLabel = new JLabel("", SwingConstants.CENTER);
         resultLabel.setVisible(false);
     }
-    
-    
-    /**
-     * Collects data from JTextFields + OptionType, sends to Engine, and displays result
-     */
-    private void onButtonClick() {
-        
-        if(resultLabel.isVisible())
-            resultLabel.setVisible(false);
-        
-        String optionType = (String) optionTypeCombo.getSelectedItem();
-        
-        try{
-            double spotPrice = Double.parseDouble(spotField.getText());
-            double strikePrice = Double.parseDouble(strikeField.getText());
-            double rate = Double.parseDouble(rateField.getText());
-            double volatility = Double.parseDouble(volField.getText());
-            double time = Double.parseDouble(timeField.getText());
-         
-        
-        EuropeanOption current;
-        
-        if(optionType.toUpperCase().equals("CALL")) {
-            current = EuropeanOption.call(strikePrice, time);
-        } else {
-            current = EuropeanOption.put(strikePrice, time);
-        }
-        
-        boolean isValidated = validateInputs(spotPrice, strikePrice, rate, volatility, time);
-        
-        if(isValidated) {
-            PricingResult price = BlackScholesEngine.price(current, spotPrice, rate, volatility);
 
-            resultLabel.setText(price.toString());
-            resultLabel.setVisible(true);
+
+    private void onButtonClick() {
+
+        resultLabel.setVisible(false);
+
+        OptionType type = (OptionType) optionTypeCombo.getSelectedItem();
+
+        double spot, strike, rate, vol, time;
+        try {
+            spot   = Double.parseDouble(spotField.getText().trim());
+            strike = Double.parseDouble(strikeField.getText().trim());
+            rate   = Double.parseDouble(rateField.getText().trim());
+            vol    = Double.parseDouble(volField.getText().trim());
+            time   = Double.parseDouble(timeField.getText().trim());
+        } catch(NumberFormatException ex) {
+            showResult(INVALID_INPUT_MSG);
+            return;
         }
-   
-        else {
-            resultLabel.setText("Please enter valid values in inputs");
-            resultLabel.setVisible(true);
+
+        if(!validateInputs(spot, strike, rate, vol, time)) {
+            showResult(INVALID_INPUT_MSG);
+            return;
         }
-        
-        } catch(java.lang.NumberFormatException e) {
-            resultLabel.setText("Please enter valid values in inputs");
-            resultLabel.setVisible(true);
+
+        try {
+            EuropeanOption option = EuropeanOption.of(type, strike, time);
+            PricingResult result = BlackScholesEngine.price(option, spot, rate, vol);
+            showResult(result.toString());
+        } catch(IllegalArgumentException ex) {
+            showResult(INVALID_INPUT_MSG);
         }
     }
-    
-    
-    /**
-     * Validates user inputs based on historical possibilities
-     * @param spot
-     * @param strike
-     * @param rate
-     * @param vol
-     * @param time
-     * @return boolean
-     */
-    private boolean validateInputs(double spot, double strike, double rate, double vol, double time)
-    {
-        if(spot <= 0)
-            return false;
-                    
-        if(strike <= 0)
-            return false;
-        
-        if(rate <= 0 || rate>=1)
-            return false;
-        
-        if(vol <= 0 || vol>=5)
-            return false;
-        
-        if(time <= 0)
-            return false;
-        
+
+
+    private void showResult(String text) {
+        resultLabel.setText(text);
+        resultLabel.setVisible(true);
+    }
+
+
+    // Sanity bounds; negative rates are allowed (real-world EUR/CHF policy rates have been negative).
+    private boolean validateInputs(double spot, double strike, double rate, double vol, double time) {
+        if(spot   <= 0)            return false;
+        if(strike <= 0)            return false;
+        if(rate   <= -0.2 || rate >= 1.0) return false;
+        if(vol    <=  0.0 || vol  >= 5.0) return false;
+        if(time   <= 0)            return false;
         return true;
     }
-    
 }
