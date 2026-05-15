@@ -187,7 +187,7 @@ Transport security (TLS / mTLS) is out of scope — terminate at a reverse proxy
 
 ### Prebuilt v1.0 JAR
 
-[**Download the v1.0 release**](https://drive.google.com/file/d/1REndptovCK-ZLfrBIOfMd7VRly_QwX_W/view?usp=sharing) — note this is the original European-only release; for the full feature set, build from source.
+[**Download release**](https://drive.google.com/file/d/1REndptovCK-ZLfrBIOfMd7VRly_QwX_W/view?usp=sharing) — note that you need to select the latest version.
 
 ## API
 
