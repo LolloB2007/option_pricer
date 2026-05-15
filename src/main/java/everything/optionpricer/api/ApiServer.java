@@ -21,11 +21,14 @@ import everything.optionpricer.pricing.FiniteDifferenceEngine;
 import everything.optionpricer.pricing.Greeks;
 import everything.optionpricer.pricing.GreeksCalculator;
 import everything.optionpricer.pricing.HestonEngine;
+import everything.optionpricer.pricing.HestonMonteCarloEngine;
 import everything.optionpricer.pricing.ImpliedVolatility;
 import everything.optionpricer.pricing.LongstaffSchwartzEngine;
 import everything.optionpricer.pricing.MonteCarloEngine;
 import everything.optionpricer.pricing.MultiModelPrice;
 import everything.optionpricer.pricing.PricingModel;
+import everything.optionpricer.pricing.VolatilitySurface;
+import java.util.List;
 
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -77,20 +80,23 @@ public final class ApiServer {
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
             int timeSteps, boolean discreteMonitoring, boolean arithmeticAverage,
-            Integer simulations, DividendsDto dividends) {}
+            Integer simulations, DividendsDto dividends,
+            String model, HestonParamsDto heston) {}
 
     public record BarrierRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
             int timeSteps, boolean discreteMonitoring,
             double barrier, boolean upBarrier, boolean inBarrier,
-            Integer simulations, DividendsDto dividends) {}
+            Integer simulations, DividendsDto dividends,
+            String model, HestonParamsDto heston) {}
 
     public record LookbackRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
             int timeSteps, boolean discreteMonitoring, boolean fixedStrike,
-            Integer simulations, DividendsDto dividends) {}
+            Integer simulations, DividendsDto dividends,
+            String model, HestonParamsDto heston) {}
 
     public record AmericanRequest(
             String type, double spot, double strike,
@@ -145,6 +151,18 @@ public final class ApiServer {
     public record PriceAndGreeksResponse(double price, Greeks greeks) {}
     public record ImpliedVolResponse(double impliedVolatility, double price) {}
 
+    public record VolSurfaceFitRequest(
+            double spot, double rate, DividendsDto dividends,
+            QuoteDto[] quotes) {}
+
+    public record QuoteDto(double strike, double timeToExpiry, String type, double marketPrice) {}
+
+    public record VolSurfacePointDto(double strike, double timeToExpiry, double impliedVolatility) {}
+
+    public record VolSurfaceFailureDto(QuoteDto quote, String reason) {}
+
+    public record VolSurfaceFitResponse(VolSurfacePointDto[] points, VolSurfaceFailureDto[] failures) {}
+
 
     // ===================================================================
     //  Bootstrap
@@ -169,6 +187,7 @@ public final class ApiServer {
         server.createContext("/greeks/barrier",  wrap(ApiServer::greeksBarrier,    true));
         server.createContext("/greeks/lookback", wrap(ApiServer::greeksLookback,   true));
         server.createContext("/greeks/american", wrap(ApiServer::greeksAmerican,   true));
+        server.createContext("/vol-surface/fit",  wrap(ApiServer::volSurfaceFit, true));
         server.createContext("/implied-vol/european", wrap(ApiServer::impliedVolEuropean, true));
         server.createContext("/implied-vol/asian",    wrap(ApiServer::impliedVolAsian,    true));
         server.createContext("/implied-vol/barrier",  wrap(ApiServer::impliedVolBarrier,  true));
@@ -358,10 +377,8 @@ public final class ApiServer {
                 req.strike, req.timeToExpiry, parseType(req.type),
                 req.timeSteps, req.discreteMonitoring, req.arithmeticAverage);
         DividendSchedule divs = toSchedule(req.dividends);
-        PricingResult res = (req.simulations != null)
-                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
-                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, divs);
-        sendJson(ex, 200, new PriceResponse(res.getPrice()));
+        sendJson(ex, 200, pricePathDependent(opt, req.spot, req.rate, req.volatility,
+                                             req.simulations, divs, req.model, req.heston));
     }
 
 
@@ -372,10 +389,8 @@ public final class ApiServer {
                 req.timeSteps, req.discreteMonitoring,
                 req.barrier, req.upBarrier, req.inBarrier);
         DividendSchedule divs = toSchedule(req.dividends);
-        PricingResult res = (req.simulations != null)
-                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
-                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, divs);
-        sendJson(ex, 200, new PriceResponse(res.getPrice()));
+        sendJson(ex, 200, pricePathDependent(opt, req.spot, req.rate, req.volatility,
+                                             req.simulations, divs, req.model, req.heston));
     }
 
 
@@ -385,10 +400,39 @@ public final class ApiServer {
                 req.strike, req.timeToExpiry, parseType(req.type),
                 req.timeSteps, req.discreteMonitoring, req.fixedStrike);
         DividendSchedule divs = toSchedule(req.dividends);
-        PricingResult res = (req.simulations != null)
-                ? MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
-                : MonteCarloEngine.price(opt, req.spot, req.rate, req.volatility, divs);
-        sendJson(ex, 200, new PriceResponse(res.getPrice()));
+        sendJson(ex, 200, pricePathDependent(opt, req.spot, req.rate, req.volatility,
+                                             req.simulations, divs, req.model, req.heston));
+    }
+
+
+    /**
+     * Shared dispatch for the three path-dependent price endpoints. Model
+     * defaults to MC (GBM); selecting HESTON requires Heston params and
+     * runs {@link HestonMonteCarloEngine}.
+     */
+    private static ModelPriceResponse pricePathDependent(
+            everything.optionpricer.model.PathDependentOption opt,
+            double spot, double rate, double sigma,
+            Integer simulations, DividendSchedule divs,
+            String modelStr, HestonParamsDto hestonDto) {
+
+        PricingModel model = parseModel(modelStr, PricingModel.MC);
+        switch(model) {
+            case MC -> {
+                double p = (simulations != null)
+                        ? MonteCarloEngine.price(opt, spot, rate, sigma, simulations, divs).getPrice()
+                        : MonteCarloEngine.price(opt, spot, rate, sigma, divs).getPrice();
+                return new ModelPriceResponse(p, "MC", null);
+            }
+            case HESTON -> {
+                HestonParams h = toHestonParams(hestonDto);
+                double p = (simulations != null)
+                        ? HestonMonteCarloEngine.price(opt, spot, rate, h, simulations, divs).getPrice()
+                        : HestonMonteCarloEngine.price(opt, spot, rate, h, divs).getPrice();
+                return new ModelPriceResponse(p, "HESTON", null);
+            }
+            default -> throw new IllegalArgumentException("model " + model + " is not applicable to path-dependent options");
+        }
     }
 
 
@@ -613,6 +657,37 @@ public final class ApiServer {
             default -> throw new IllegalArgumentException("model " + model + " not applicable to American IV");
         }
         sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+    }
+
+
+    // ===================================================================
+    //  /vol-surface/fit
+    // ===================================================================
+
+    private static void volSurfaceFit(HttpExchange ex) throws IOException {
+        VolSurfaceFitRequest req = readJson(ex, VolSurfaceFitRequest.class);
+        if(req.quotes == null || req.quotes.length == 0)
+            throw new IllegalArgumentException("`quotes` array must not be empty");
+
+        List<VolatilitySurface.Quote> quotes = new java.util.ArrayList<>(req.quotes.length);
+        for(QuoteDto q : req.quotes) {
+            quotes.add(new VolatilitySurface.Quote(
+                    q.strike, q.timeToExpiry, parseType(q.type), q.marketPrice));
+        }
+        DividendSchedule divs = toSchedule(req.dividends);
+        VolatilitySurface surf = VolatilitySurface.fit(quotes, req.spot, req.rate, divs);
+
+        VolSurfacePointDto[]   points    = surf.points().stream()
+                .map(p -> new VolSurfacePointDto(p.strike(), p.timeToExpiry(), p.impliedVolatility()))
+                .toArray(VolSurfacePointDto[]::new);
+        VolSurfaceFailureDto[] failures  = surf.failures().stream()
+                .map(f -> new VolSurfaceFailureDto(
+                        new QuoteDto(f.quote().strike(), f.quote().timeToExpiry(),
+                                     f.quote().type().name(), f.quote().marketPrice()),
+                        f.reason()))
+                .toArray(VolSurfaceFailureDto[]::new);
+
+        sendJson(ex, 200, new VolSurfaceFitResponse(points, failures));
     }
 
 
