@@ -36,6 +36,7 @@ import java.io.OutputStream;
 import java.io.Reader;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.concurrent.Executors;
 
 
@@ -63,6 +64,13 @@ import java.util.concurrent.Executors;
 public final class ApiServer {
 
     private static final Gson GSON = new Gson();
+
+    /**
+     * Configured bearer token. {@code null} → no auth (every endpoint open).
+     * When non-null, every endpoint except {@code /health} and {@code OPTIONS}
+     * preflight requires {@code Authorization: Bearer <token>}.
+     */
+    private static volatile String apiToken;
 
     private ApiServer() {}
 
@@ -169,11 +177,27 @@ public final class ApiServer {
     // ===================================================================
 
     /**
-     * Start the API server on {@code port} and return the running instance.
-     * The server runs in background threads; the caller stays alive by
-     * keeping the JVM alive (e.g. through {@link Main}).
+     * Start the API server on {@code port} with no authentication. Every
+     * endpoint is open. Intended for localhost / development.
      */
     public static HttpServer start(int port) throws IOException {
+        return start(port, null);
+    }
+
+
+    /**
+     * Start the API server on {@code port}. If {@code authToken} is
+     * non-null and non-empty, every endpoint except {@code /health} and
+     * {@code OPTIONS} preflight requires the header
+     * {@code Authorization: Bearer <authToken>}.
+     */
+    public static HttpServer start(int port, String authToken) throws IOException {
+        apiToken = (authToken == null || authToken.isBlank()) ? null : authToken;
+        return startInternal(port);
+    }
+
+
+    private static HttpServer startInternal(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
         server.createContext("/health",          wrap(ApiServer::health,           false));
@@ -221,9 +245,22 @@ public final class ApiServer {
             addCorsHeaders(ex);
             String method = ex.getRequestMethod();
 
+            // Browsers send OPTIONS preflight without the Authorization header.
+            // CORS would break if we 401'd preflight.
             if("OPTIONS".equalsIgnoreCase(method)) {
                 ex.sendResponseHeaders(204, -1);
                 return;
+            }
+
+            // Auth gate. /health is intentionally exempt so liveness probes
+            // don't need credentials.
+            if(apiToken != null && !"/health".equals(ex.getRequestURI().getPath())) {
+                if(!hasValidBearerToken(ex)) {
+                    ex.getResponseHeaders().add("WWW-Authenticate", "Bearer");
+                    sendJson(ex, 401, new ErrorResponse(
+                            "missing or invalid Authorization header — expected: Bearer <token>"));
+                    return;
+                }
             }
 
             if(requirePost && !"POST".equalsIgnoreCase(method)) {
@@ -241,6 +278,28 @@ public final class ApiServer {
                 ex.close();
             }
         };
+    }
+
+
+    /**
+     * Validate {@code Authorization: Bearer <token>} in constant time
+     * against the configured token. Returns {@code false} if the header
+     * is missing, malformed, or the token doesn't match.
+     */
+    private static boolean hasValidBearerToken(HttpExchange ex) {
+        String header = ex.getRequestHeaders().getFirst("Authorization");
+        if(header == null) return false;
+
+        String prefix = "Bearer ";
+        if(header.length() <= prefix.length()
+                || !header.regionMatches(true, 0, prefix, 0, prefix.length())) {
+            return false;
+        }
+        String presented = header.substring(prefix.length()).trim();
+
+        byte[] a = presented.getBytes(StandardCharsets.UTF_8);
+        byte[] b = apiToken.getBytes(StandardCharsets.UTF_8);
+        return MessageDigest.isEqual(a, b);
     }
 
 

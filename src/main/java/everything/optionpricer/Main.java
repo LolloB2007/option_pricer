@@ -21,17 +21,27 @@ public class Main {
     public static void main(String[] args) {
         if(args.length > 0 && "--api".equalsIgnoreCase(args[0])) {
             int port = 8080;
-            if(args.length > 1) {
-                try {
-                    port = Integer.parseInt(args[1]);
-                } catch(NumberFormatException e) {
-                    System.err.println("invalid port: " + args[1]);
-                    System.exit(1);
+            String token = System.getenv("OPTIONPRICER_API_TOKEN");
+            // Parse remaining args order-independently.
+            for(int i = 1; i < args.length; i++) {
+                if("--token".equalsIgnoreCase(args[i]) && i + 1 < args.length) {
+                    token = args[++i];
+                } else {
+                    try {
+                        port = Integer.parseInt(args[i]);
+                    } catch(NumberFormatException e) {
+                        System.err.println("ignored arg: " + args[i]);
+                    }
                 }
             }
             try {
-                ApiServer.start(port);
+                ApiServer.start(port, token);
                 System.out.println("OptionPricer API listening on http://localhost:" + port);
+                if(token != null && !token.isBlank()) {
+                    System.out.println("Authentication: ENABLED — bearer token required on every endpoint except /health.");
+                } else {
+                    System.out.println("Authentication: DISABLED — bind to localhost only or front with a reverse proxy.");
+                }
                 // Keep the JVM alive; the server uses daemon-like executor threads otherwise.
                 Thread.currentThread().join();
             } catch(IOException e) {
