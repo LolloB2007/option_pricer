@@ -4,7 +4,7 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v2.4**
+**Current release: v2.5**
 
 Highlights since v1.0:
 
@@ -12,6 +12,8 @@ Highlights since v1.0:
 - American options priced by **Longstaff–Schwartz** regression Monte Carlo.
 - Both **discrete** and **continuous** monitoring for the path-dependent types, including Brownian-bridge corrections.
 - **Multiple pricing engines** — Black-Scholes closed form, **Cox-Ross-Rubinstein binomial**, **Crank-Nicolson PDE**, **Heston (Fourier inversion)** alongside Monte Carlo and LSM.
+- **Heston Monte Carlo** for path-dependent options (Asian, Barrier, Lookback) — two-factor full-truncation Euler discretisation; antithetic + parallel.
+- **Volatility surface fitter** — inverts a list of market quotes into a 2D implied-vol surface with strike skew and term structure; linear-in-strike, linear-in-time interpolation.
 - **Auto mode**: trimmed mean of model outputs ("mean of the two middle outputs") — robust against a single misbehaving engine.
 - **Greeks** (Δ, Γ, ν, Θ, ρ) **dispatched by the selected pricing model** — closed-form under BS, deterministic-pricer finite differences under Binomial / PDE / Heston, CRN-seeded MC / LSM finite differences for path-dependent + American; **Auto** trims across the σ-based models component-by-component.
 - **Implied volatility** solver **dispatched by the selected pricing model** — closed-form Newton + bisection for BS, Newton on the deterministic pricer for Binomial / PDE, `v₀` inversion (reported as `√v₀`) for Heston, CRN-seeded MC / LSM for path-dependent + American.
@@ -45,7 +47,11 @@ Every applicable engine can be selected explicitly. There is also an **Auto** mo
 |-------------|--------------------|-------------------|
 | European    | BS, Binomial, PDE, Heston | BS, Binomial, PDE |
 | American    | LSM, Binomial, PDE | LSM, Binomial, PDE |
-| Asian / Barrier / Lookback | MC (path-dependent — no Auto) | — |
+| Asian / Barrier / Lookback | MC (GBM), Heston-MC | — |
+
+### Volatility surface
+
+`VolatilitySurface.fit(quotes, spot, rate, dividends)` inverts a list of European market quotes `(strike, T, type, marketPrice)` under Black-Scholes, organises the resulting implied vols into per-expiry slices, and exposes `volAt(strike, T)`. Strike interpolation is linear inside each bracketing slice; time interpolation is linear between slices; flat extrapolation outside the convex hull. Captures both **term structure** (different σ per expiry slice) and **skew** (σ varying with K inside a slice).
 
 ### Greeks & implied vol
 - **Greeks** (delta, gamma, vega, theta, rho) for every option type, dispatched by the selected pricing model
@@ -217,6 +223,12 @@ Errors return an HTTP 4xx/5xx status with:
 | `POST` | `/implied-vol/lookback` | CRN-seeded MC inversion |
 | `POST` | `/implied-vol/american` | CRN-seeded LSM inversion |
 
+**Volatility surface** — returns `{ "points": [{ strike, timeToExpiry, impliedVolatility }, ...], "failures": [...] }`:
+
+| Verb | Path | Description |
+|------|------|-------------|
+| `POST` | `/vol-surface/fit` | Inverts a list of European quotes into a vol-surface point cloud |
+
 ### Request bodies
 
 All bodies accept an optional **`dividends`** field of the shape:
@@ -239,6 +251,7 @@ Both `continuousYield` and `discrete` are independently optional; omit either or
 |-----------------|----------------|---------|
 | `/price/european`, `/greeks/european`, `/implied-vol/european` | `BS`, `BINOMIAL`, `PDE`, `HESTON`, `AUTO` | `BS` |
 | `/price/american`, `/greeks/american`, `/implied-vol/american` | `LSM`, `BINOMIAL`, `PDE`, `AUTO` | `LSM` |
+| `/price/asian`, `/price/barrier`, `/price/lookback` | `MC`, `HESTON` | `MC` |
 
 When `model=HESTON`, the body must also include a `heston` object:
 ```json
@@ -408,6 +421,27 @@ curl -s -X POST -H "Content-Type: application/json" \
      http://localhost:8080/price/american
 # → {"price":~6.03}
 
+# Asian arithmetic call under Heston (two-factor MC)
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "timeSteps":252,"discreteMonitoring":true,"arithmeticAverage":true,
+          "model":"HESTON",
+          "heston":{"v0":0.04,"kappa":1.5,"theta":0.04,"xi":0.30,"rho":-0.7}}' \
+     http://localhost:8080/price/asian
+# → {"price":~5.77,"model":"HESTON"}
+
+# Volatility surface fit
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"spot":100,"rate":0.05,"quotes":[
+          {"strike":90,"timeToExpiry":0.25,"type":"CALL","marketPrice":11.5},
+          {"strike":100,"timeToExpiry":0.25,"type":"CALL","marketPrice":4.6},
+          {"strike":110,"timeToExpiry":0.25,"type":"CALL","marketPrice":1.0},
+          {"strike":90,"timeToExpiry":1.0,"type":"CALL","marketPrice":15.7},
+          {"strike":100,"timeToExpiry":1.0,"type":"CALL","marketPrice":10.45},
+          {"strike":110,"timeToExpiry":1.0,"type":"CALL","marketPrice":6.5}]}' \
+     http://localhost:8080/vol-surface/fit
+# → {"points":[{strike,timeToExpiry,impliedVolatility}, ...],"failures":[]}
+
 # Asian arithmetic call with two discrete dividends
 curl -s -X POST -H "Content-Type: application/json" \
      -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
@@ -443,19 +477,17 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 - Discrete-dividend handling in the closed-form / tree / PDE engines uses the escrowed model — exact for the standard convention, but not the only valid approach
 - For options non-monotone in σ (most notably up-and-out and down-and-out calls), the IV solver returns one valid root — there can be a second on the same target price
-- Binomial / PDE / Heston engines apply only to European and (for binomial/PDE) American payoffs; the path-dependent option types remain MC-only
+- Binomial / PDE engines apply only to European and American payoffs; path-dependent options use MC or Heston-MC
+- The path-dependent Brownian-bridge corrections (continuous-monitoring Barrier / Lookback) assume constant σ — under Heston they become an approximation (`σ ≈ √θ`). Prefer discrete monitoring with a fine grid for Heston path-dependent
 - For options whose price is non-monotonic in σ (e.g. up-and-out calls) the IV solver returns one valid root — there may be a second
 - IV solver floors σ at 1% (covers every real-world option; avoids the CRR binomial parametrisation degeneracy when `|r-q|·√Δt > σ·√Δt`)
 - No API authentication — bind to localhost or front with a reverse proxy in any non-trivial deployment
 
 ## Roadmap
 
-Possible future improvements:
+The project is essentially feature-complete. The only outstanding item that would matter for a real deployment:
 
-- Heston for path-dependent payoffs via two-factor MC
-- volatility surface fitter (term structure + skew)
-- batch-pricing endpoint on the API
-- API authentication for non-local deployments
+- **API authentication** — token or mTLS, needed before exposing the server beyond localhost.
 
 ## Motivation
 
