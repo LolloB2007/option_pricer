@@ -10,11 +10,15 @@ import everything.optionpricer.model.Option;
 import everything.optionpricer.model.OptionType;
 import everything.optionpricer.model.PathDependentOption;
 import everything.optionpricer.model.PricingResult;
+import everything.optionpricer.pricing.BinomialEngine;
+import everything.optionpricer.pricing.FiniteDifferenceEngine;
 import everything.optionpricer.pricing.Greeks;
 import everything.optionpricer.pricing.GreeksCalculator;
 import everything.optionpricer.pricing.ImpliedVolatility;
 import everything.optionpricer.pricing.LongstaffSchwartzEngine;
 import everything.optionpricer.pricing.MonteCarloEngine;
+import everything.optionpricer.pricing.MultiModelPrice;
+import everything.optionpricer.pricing.PricingModel;
 
 import javax.swing.*;
 import java.awt.CardLayout;
@@ -48,6 +52,9 @@ public class MonteCarloPanel extends JPanel {
     private JComboBox<String> barrierDirCombo, barrierInOutCombo, barrierMonitoringCombo;
     private JComboBox<String> lookbackStrikeCombo, lookbackMonitoringCombo;
     private JTextField americanExerciseField;
+    private JComboBox<String> americanModelCombo;
+
+    private JLabel modelDetailLabel;
 
     private CardLayout cardLayout;
     private JPanel cardPanel;
@@ -79,9 +86,10 @@ public class MonteCarloPanel extends JPanel {
         add(buildCommonInputs(), "growx, wrap");
         add(cardPanel,           "growx, wrap");
 
-        add(priceButton,   "alignx center, wrap, gaptop 2");
-        add(resultLabel,   "alignx center, wrap, gaptop 2");
-        add(greeksPanel,   "growx, wrap, gaptop 2");
+        add(priceButton,       "alignx center, wrap, gaptop 2");
+        add(resultLabel,       "alignx center, wrap, gaptop 2");
+        add(modelDetailLabel,  "alignx center, wrap, gaptop 2");
+        add(greeksPanel,       "growx, wrap, gaptop 2");
         add(quantileChart, "grow, push, gaptop 8");
         add(payoffChart,   "grow, push, gaptop 8");
         add(buildIvSection(), "growx, wrap, gaptop 8");
@@ -118,6 +126,11 @@ public class MonteCarloPanel extends JPanel {
         lookbackMonitoringCombo = new JComboBox<>(new String[] { "Discrete", "Continuous" });
 
         americanExerciseField = field("50");
+        americanModelCombo    = new JComboBox<>(new String[] { "Auto", "Longstaff-Schwartz", "Binomial", "PDE" });
+
+        modelDetailLabel = new JLabel(" ");
+        modelDetailLabel.setForeground(new java.awt.Color(0x9094A8));
+        modelDetailLabel.setFont(modelDetailLabel.getFont().deriveFont(11.5f));
 
         cardLayout = new CardLayout();
         cardPanel  = new JPanel(cardLayout);
@@ -223,9 +236,10 @@ public class MonteCarloPanel extends JPanel {
     }
 
     private Card buildAmericanCard() {
-        Card card = new Card(new MigLayout("fillx, insets 0", "[120!][grow, fill]", "[]"));
-        card.add(Theme.formLabel("Exercise dates"));
-        card.add(americanExerciseField, "wrap");
+        Card card = new Card(new MigLayout("fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]", "[]10[]"));
+        card.add(Theme.formLabel("Exercise dates")); card.add(americanExerciseField);
+        card.add(new JLabel());                      card.add(Theme.formLabel("Model")); card.add(americanModelCombo, "wrap");
         return card;
     }
 
@@ -247,6 +261,7 @@ public class MonteCarloPanel extends JPanel {
 
     private void onPrice() {
         resultLabel.setVisible(false);
+        modelDetailLabel.setText(" ");
         greeksPanel.clear();
         quantileChart.clear();
         payoffChart.clear();
@@ -306,7 +321,7 @@ public class MonteCarloPanel extends JPanel {
                 }
                 case "American": {
                     AmericanOption opt = buildAmerican(type, strike, time);
-                    result = LongstaffSchwartzEngine.price(opt, spot, rate, vol, divs);
+                    result = priceAmericanByModel(opt, spot, rate, vol, divs);
                     pricedOption = opt;
                     break;
                 }
@@ -438,6 +453,38 @@ public class MonteCarloPanel extends JPanel {
     private AmericanOption buildAmerican(OptionType type, double strike, double time) {
         int dates = Integer.parseInt(americanExerciseField.getText().trim());
         return new AmericanOption(strike, time, type, dates);
+    }
+
+
+    private PricingResult priceAmericanByModel(AmericanOption opt, double spot, double rate, double vol,
+                                               DividendSchedule divs) {
+        String choice = (String) americanModelCombo.getSelectedItem();
+        switch(choice) {
+            case "Longstaff-Schwartz": {
+                modelDetailLabel.setText("Model: Longstaff-Schwartz (50k paths)");
+                return LongstaffSchwartzEngine.price(opt, spot, rate, vol, divs);
+            }
+            case "Binomial": {
+                modelDetailLabel.setText("Model: Binomial (CRR, 1000 steps)");
+                return BinomialEngine.price(opt, spot, rate, vol, divs);
+            }
+            case "PDE": {
+                modelDetailLabel.setText("Model: Crank-Nicolson PDE");
+                return FiniteDifferenceEngine.price(opt, spot, rate, vol, divs);
+            }
+            default: { // Auto
+                double lsm = LongstaffSchwartzEngine.price(opt, spot, rate, vol, divs).getPrice();
+                double bin = BinomialEngine.price(opt, spot, rate, vol, divs).getPrice();
+                double pde = FiniteDifferenceEngine.price(opt, spot, rate, vol, divs).getPrice();
+                MultiModelPrice.Aggregated agg = MultiModelPrice.builder()
+                        .add(PricingModel.LSM, lsm)
+                        .add(PricingModel.BINOMIAL, bin)
+                        .add(PricingModel.PDE, pde)
+                        .build();
+                modelDetailLabel.setText(String.format("Auto · LSM=%.4f · Bin=%.4f · PDE=%.4f", lsm, bin, pde));
+                return new PricingResult(agg.price());
+            }
+        }
     }
 
 

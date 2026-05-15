@@ -11,15 +11,21 @@ import everything.optionpricer.model.AsianOption;
 import everything.optionpricer.model.BarrierOption;
 import everything.optionpricer.model.DividendSchedule;
 import everything.optionpricer.model.EuropeanOption;
+import everything.optionpricer.model.HestonParams;
 import everything.optionpricer.model.LookbackOption;
 import everything.optionpricer.model.OptionType;
 import everything.optionpricer.model.PricingResult;
+import everything.optionpricer.pricing.BinomialEngine;
 import everything.optionpricer.pricing.BlackScholesEngine;
+import everything.optionpricer.pricing.FiniteDifferenceEngine;
 import everything.optionpricer.pricing.Greeks;
 import everything.optionpricer.pricing.GreeksCalculator;
+import everything.optionpricer.pricing.HestonEngine;
 import everything.optionpricer.pricing.ImpliedVolatility;
 import everything.optionpricer.pricing.LongstaffSchwartzEngine;
 import everything.optionpricer.pricing.MonteCarloEngine;
+import everything.optionpricer.pricing.MultiModelPrice;
+import everything.optionpricer.pricing.PricingModel;
 
 import java.io.IOException;
 import java.io.InputStreamReader;
@@ -65,7 +71,7 @@ public final class ApiServer {
     public record EuropeanRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
-            DividendsDto dividends) {}
+            DividendsDto dividends, String model, HestonParamsDto heston) {}
 
     public record AsianRequest(
             String type, double spot, double strike,
@@ -89,7 +95,10 @@ public final class ApiServer {
     public record AmericanRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
-            int exerciseDates, Integer simulations, DividendsDto dividends) {}
+            int exerciseDates, Integer simulations, DividendsDto dividends,
+            String model) {}
+
+    public record HestonParamsDto(double v0, double kappa, double theta, double xi, double rho) {}
 
     public record ImpliedVolRequest(
             String type, double spot, double strike,
@@ -129,6 +138,7 @@ public final class ApiServer {
     public record DiscreteDividend(double time, double amount) {}
 
     public record PriceResponse(double price)      {}
+    public record ModelPriceResponse(double price, String model, java.util.Map<String, Double> contributions) {}
     public record ErrorResponse(String error)      {}
     public record HealthResponse(String status)    {}
     public record PriceAndGreeksResponse(double price, Greeks greeks) {}
@@ -252,6 +262,30 @@ public final class ApiServer {
     }
 
 
+    private static PricingModel parseModel(String model, PricingModel defaultModel) {
+        if(model == null || model.isBlank()) return defaultModel;
+        try {
+            return PricingModel.valueOf(model.trim().toUpperCase());
+        } catch(IllegalArgumentException e) {
+            throw new IllegalArgumentException("Unknown model '" + model + "' — try one of "
+                    + java.util.Arrays.toString(PricingModel.values()));
+        }
+    }
+
+
+    private static HestonParams toHestonParams(HestonParamsDto h) {
+        if(h == null) throw new IllegalArgumentException("Heston params required when model=HESTON");
+        return new HestonParams(h.v0(), h.kappa(), h.theta(), h.xi(), h.rho());
+    }
+
+
+    private static java.util.Map<String, Double> stringKeyed(java.util.Map<PricingModel, Double> in) {
+        java.util.Map<String, Double> out = new java.util.LinkedHashMap<>();
+        for(var e : in.entrySet()) out.put(e.getKey().name(), e.getValue());
+        return out;
+    }
+
+
     /** Convert the JSON dividends DTO to the engine's {@link DividendSchedule}. */
     private static DividendSchedule toSchedule(DividendsDto d) {
         if(d == null) return DividendSchedule.NONE;
@@ -281,8 +315,39 @@ public final class ApiServer {
         EuropeanRequest req = readJson(ex, EuropeanRequest.class);
         EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
         DividendSchedule divs = toSchedule(req.dividends);
-        PricingResult res = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs);
-        sendJson(ex, 200, new PriceResponse(res.getPrice()));
+        PricingModel model = parseModel(req.model, PricingModel.BS);
+
+        switch(model) {
+            case BS -> {
+                double p = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                sendJson(ex, 200, new ModelPriceResponse(p, "BS", null));
+            }
+            case BINOMIAL -> {
+                double p = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                sendJson(ex, 200, new ModelPriceResponse(p, "BINOMIAL", null));
+            }
+            case PDE -> {
+                double p = FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                sendJson(ex, 200, new ModelPriceResponse(p, "PDE", null));
+            }
+            case HESTON -> {
+                HestonParams h = toHestonParams(req.heston);
+                double p = HestonEngine.price(opt, req.spot, req.rate, h, divs).getPrice();
+                sendJson(ex, 200, new ModelPriceResponse(p, "HESTON", null));
+            }
+            case AUTO -> {
+                MultiModelPrice.Builder b = MultiModelPrice.builder()
+                        .add(PricingModel.BS,       BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                        .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                        .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice());
+                if(req.heston != null) {
+                    b.add(PricingModel.HESTON, HestonEngine.price(opt, req.spot, req.rate, toHestonParams(req.heston), divs).getPrice());
+                }
+                MultiModelPrice.Aggregated agg = b.build();
+                sendJson(ex, 200, new ModelPriceResponse(agg.price(), "AUTO", stringKeyed(agg.contributions())));
+            }
+            default -> throw new IllegalArgumentException("model " + model + " is not applicable to European pricing");
+        }
     }
 
 
@@ -331,10 +396,36 @@ public final class ApiServer {
         AmericanOption opt = new AmericanOption(
                 req.strike, req.timeToExpiry, parseType(req.type), req.exerciseDates);
         DividendSchedule divs = toSchedule(req.dividends);
-        PricingResult res = (req.simulations != null)
-                ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
-                : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs);
-        sendJson(ex, 200, new PriceResponse(res.getPrice()));
+        PricingModel model = parseModel(req.model, PricingModel.LSM);
+
+        switch(model) {
+            case LSM -> {
+                double p = (req.simulations != null)
+                        ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
+                        : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                sendJson(ex, 200, new ModelPriceResponse(p, "LSM", null));
+            }
+            case BINOMIAL -> {
+                double p = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                sendJson(ex, 200, new ModelPriceResponse(p, "BINOMIAL", null));
+            }
+            case PDE -> {
+                double p = FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                sendJson(ex, 200, new ModelPriceResponse(p, "PDE", null));
+            }
+            case AUTO -> {
+                double lsm = (req.simulations != null)
+                        ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
+                        : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                MultiModelPrice.Aggregated agg = MultiModelPrice.builder()
+                        .add(PricingModel.LSM,      lsm)
+                        .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                        .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                        .build();
+                sendJson(ex, 200, new ModelPriceResponse(agg.price(), "AUTO", stringKeyed(agg.contributions())));
+            }
+            default -> throw new IllegalArgumentException("model " + model + " is not applicable to American pricing");
+        }
     }
 
 

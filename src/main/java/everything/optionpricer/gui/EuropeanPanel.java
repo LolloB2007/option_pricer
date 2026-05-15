@@ -3,12 +3,20 @@ package everything.optionpricer.gui;
 import com.formdev.flatlaf.FlatClientProperties;
 import everything.optionpricer.model.DividendSchedule;
 import everything.optionpricer.model.EuropeanOption;
+import everything.optionpricer.model.HestonParams;
 import everything.optionpricer.model.OptionType;
 import everything.optionpricer.model.PricingResult;
+import everything.optionpricer.pricing.BinomialEngine;
 import everything.optionpricer.pricing.BlackScholesEngine;
+import everything.optionpricer.pricing.FiniteDifferenceEngine;
 import everything.optionpricer.pricing.Greeks;
 import everything.optionpricer.pricing.GreeksCalculator;
+import everything.optionpricer.pricing.HestonEngine;
 import everything.optionpricer.pricing.ImpliedVolatility;
+import everything.optionpricer.pricing.MultiModelPrice;
+import everything.optionpricer.pricing.PricingModel;
+
+import java.awt.CardLayout;
 
 import javax.swing.*;
 import net.miginfocom.swing.MigLayout;
@@ -25,7 +33,12 @@ public class EuropeanPanel extends JPanel {
     private static final String INVALID_INPUT_MSG = "Please enter valid values in inputs";
 
     private JComboBox<OptionType> optionTypeCombo;
+    private JComboBox<String>     modelCombo;
     private JTextField spotField, strikeField, rateField, volField, timeField, divYieldField;
+    private JTextField hV0Field, hKappaField, hThetaField, hXiField, hRhoField;
+    private CardLayout hestonCards;
+    private JPanel hestonCardsHost;
+    private JLabel modelDetailLabel;
     private JButton priceButton;
     private ResultPill resultLabel;
     private GreeksPanel greeksPanel;
@@ -48,17 +61,21 @@ public class EuropeanPanel extends JPanel {
         add(Theme.subtitle("Closed-form Black–Scholes pricer"), "wrap, gapbottom 6");
 
         add(buildInputs(), "growx, wrap");
+        add(hestonCardsHost, "growx, wrap, gaptop 4");
 
-        add(priceButton,  "alignx center, wrap, gaptop 4");
-        add(resultLabel,  "alignx center, wrap, gaptop 4");
-        add(greeksPanel,  "growx, wrap, gaptop 2");
-        add(payoffChart,  "grow, push, gaptop 6");
+        add(priceButton,    "alignx center, wrap, gaptop 4");
+        add(resultLabel,    "alignx center, wrap, gaptop 4");
+        add(modelDetailLabel, "alignx center, wrap, gaptop 2");
+        add(greeksPanel,    "growx, wrap, gaptop 2");
+        add(payoffChart,    "grow, push, gaptop 6");
         add(buildIvSection(), "growx, wrap, gaptop 8");
     }
 
 
     private void componentInit() {
         optionTypeCombo = new JComboBox<>(OptionType.values());
+        modelCombo      = new JComboBox<>(new String[] { "Auto", "Black-Scholes", "Binomial", "PDE", "Heston" });
+        modelCombo.addActionListener(e -> updateHestonVisibility());
 
         spotField     = field("e.g. 100");
         strikeField   = field("e.g. 100");
@@ -67,11 +84,26 @@ public class EuropeanPanel extends JPanel {
         timeField     = field("e.g. 1.00");
         divYieldField = field("0.00");
 
+        hV0Field    = field("0.04");
+        hKappaField = field("2.0");
+        hThetaField = field("0.04");
+        hXiField    = field("0.30");
+        hRhoField   = field("-0.7");
+
+        hestonCards = new CardLayout();
+        hestonCardsHost = new JPanel(hestonCards);
+        hestonCardsHost.setOpaque(false);
+        hestonCardsHost.add(new JPanel() {{ setOpaque(false); }}, "EMPTY");
+        hestonCardsHost.add(buildHestonCard(), "HESTON");
+
         priceButton = new JButton("Price option");
         Theme.stylePrimary(priceButton);
         priceButton.addActionListener(e -> onPrice());
 
-        resultLabel  = new ResultPill();
+        resultLabel       = new ResultPill();
+        modelDetailLabel  = new JLabel(" ");
+        modelDetailLabel.setForeground(new java.awt.Color(0x9094A8));
+        modelDetailLabel.setFont(modelDetailLabel.getFont().deriveFont(11.5f));
         greeksPanel  = new GreeksPanel();
         payoffChart  = new PayoffDiagramPanel();
 
@@ -84,18 +116,41 @@ public class EuropeanPanel extends JPanel {
     }
 
 
+    private void updateHestonVisibility() {
+        hestonCards.show(hestonCardsHost, "Heston".equals(modelCombo.getSelectedItem()) ? "HESTON" : "EMPTY");
+        hestonCardsHost.revalidate();
+        hestonCardsHost.repaint();
+    }
+
+
     private Card buildInputs() {
         Card card = new Card(new MigLayout(
                 "fillx, insets 0",
                 "[120!][grow, fill]",
-                "[]10[]10[]10[]10[]10[]10[]"));
+                "[]10[]10[]10[]10[]10[]10[]10[]10[]"));
         card.add(Theme.formLabel("Option type"));    card.add(optionTypeCombo, "wrap");
+        card.add(Theme.formLabel("Model"));          card.add(modelCombo,      "wrap");
         card.add(Theme.formLabel("Spot (S)"));       card.add(spotField,       "wrap");
         card.add(Theme.formLabel("Strike (K)"));     card.add(strikeField,     "wrap");
         card.add(Theme.formLabel("Rate (r)"));       card.add(rateField,       "wrap");
         card.add(Theme.formLabel("Volatility (σ)")); card.add(volField,        "wrap");
         card.add(Theme.formLabel("Time (T, yrs)"));  card.add(timeField,       "wrap");
         card.add(Theme.formLabel("Div yield (q)"));  card.add(divYieldField,   "wrap");
+        return card;
+    }
+
+
+    private Card buildHestonCard() {
+        Card card = new Card(new MigLayout(
+                "fillx, insets 0",
+                "[120!][grow, fill][20!][120!][grow, fill]",
+                "[]6[]6[]"));
+        card.add(Theme.subtitle("Heston parameters"), "span 5, wrap");
+        card.add(Theme.formLabel("v₀ (init var)"));  card.add(hV0Field);
+        card.add(new JLabel());                       card.add(Theme.formLabel("κ (mean rev)")); card.add(hKappaField, "wrap");
+        card.add(Theme.formLabel("θ (long var)"));   card.add(hThetaField);
+        card.add(new JLabel());                       card.add(Theme.formLabel("ξ (vol of vol)")); card.add(hXiField, "wrap");
+        card.add(Theme.formLabel("ρ (correlation)")); card.add(hRhoField, "wrap");
         return card;
     }
 
@@ -124,6 +179,7 @@ public class EuropeanPanel extends JPanel {
 
     private void onPrice() {
         resultLabel.setVisible(false);
+        modelDetailLabel.setText(" ");
         greeksPanel.clear();
         payoffChart.clear();
 
@@ -153,17 +209,81 @@ public class EuropeanPanel extends JPanel {
                 ? DividendSchedule.NONE
                 : DividendSchedule.continuous(divYield);
 
+        PricingModel model = parseSelectedModel();
+
         try {
             EuropeanOption option = EuropeanOption.of(type, strike, time);
-            PricingResult result = BlackScholesEngine.price(option, spot, rate, vol, divs);
-            showResult(result.toString());
+            double price;
+            String detail = "";
 
+            switch(model) {
+                case BS -> {
+                    price = BlackScholesEngine.price(option, spot, rate, vol, divs).getPrice();
+                    detail = "Model: Black-Scholes";
+                }
+                case BINOMIAL -> {
+                    price = BinomialEngine.price(option, spot, rate, vol, divs).getPrice();
+                    detail = "Model: Binomial (CRR, 1000 steps)";
+                }
+                case PDE -> {
+                    price = FiniteDifferenceEngine.price(option, spot, rate, vol, divs).getPrice();
+                    detail = "Model: Crank-Nicolson PDE";
+                }
+                case HESTON -> {
+                    HestonParams hp = parseHestonParams();
+                    price = HestonEngine.price(option, spot, rate, hp, divs).getPrice();
+                    detail = "Model: Heston (Fourier)";
+                }
+                case AUTO -> {
+                    double bs  = BlackScholesEngine.price(option, spot, rate, vol, divs).getPrice();
+                    double bin = BinomialEngine.price(option, spot, rate, vol, divs).getPrice();
+                    double pde = FiniteDifferenceEngine.price(option, spot, rate, vol, divs).getPrice();
+                    MultiModelPrice.Aggregated agg = MultiModelPrice.builder()
+                            .add(PricingModel.BS, bs)
+                            .add(PricingModel.BINOMIAL, bin)
+                            .add(PricingModel.PDE, pde)
+                            .build();
+                    price = agg.price();
+                    detail = String.format("Auto · BS=%.4f · Bin=%.4f · PDE=%.4f", bs, bin, pde);
+                }
+                default -> throw new IllegalArgumentException("Unsupported model: " + model);
+            }
+
+            showResult(String.format("Price: %.3f", price));
+            modelDetailLabel.setText(detail);
+
+            // Greeks are always closed-form for European (independent of selected pricer).
             Greeks g = GreeksCalculator.compute(option, spot, rate, vol, divs);
             greeksPanel.setGreeks(g);
 
             payoffChart.setInputs(spot, strike, rate, vol, time, type);
         } catch(IllegalArgumentException ex) {
-            showResult(INVALID_INPUT_MSG);
+            showResult(ex.getMessage() != null ? ex.getMessage() : INVALID_INPUT_MSG);
+        }
+    }
+
+
+    private PricingModel parseSelectedModel() {
+        return switch((String) modelCombo.getSelectedItem()) {
+            case "Black-Scholes" -> PricingModel.BS;
+            case "Binomial"      -> PricingModel.BINOMIAL;
+            case "PDE"           -> PricingModel.PDE;
+            case "Heston"        -> PricingModel.HESTON;
+            default              -> PricingModel.AUTO;
+        };
+    }
+
+
+    private HestonParams parseHestonParams() {
+        try {
+            return new HestonParams(
+                    Double.parseDouble(hV0Field.getText().trim()),
+                    Double.parseDouble(hKappaField.getText().trim()),
+                    Double.parseDouble(hThetaField.getText().trim()),
+                    Double.parseDouble(hXiField.getText().trim()),
+                    Double.parseDouble(hRhoField.getText().trim()));
+        } catch(NumberFormatException ex) {
+            throw new IllegalArgumentException("Heston params must all be numeric");
         }
     }
 

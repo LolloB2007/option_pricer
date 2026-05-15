@@ -127,6 +127,12 @@ public final class LongstaffSchwartzEngine {
         double[] y = new double[totalPaths];
         int[]    idx = new int[totalPaths];
 
+        // Precompute discountStep^k for k = 0..N. Lets us replace an O(gap)
+        // inner discount loop with a single table lookup.
+        double[] discountPow = new double[N + 1];
+        discountPow[0] = 1.0;
+        for(int k = 1; k <= N; k++) discountPow[k] = discountPow[k - 1] * discountStep;
+
         // Skip t=0 (no exercise decision at inception) and t=N-1 (terminal).
         for(int t = N - 2; t >= 1; t--) {
             int itm = 0;
@@ -137,9 +143,7 @@ public final class LongstaffSchwartzEngine {
                     x[itm] = Sit;
                     // Discounted cashflow from exercise time back to t.
                     int gap = exerciseTime[i] - t;
-                    double pv = cashflow[i];
-                    for(int g = 0; g < gap; g++) pv *= discountStep;
-                    y[itm] = pv;
+                    y[itm] = cashflow[i] * discountPow[gap];
                     idx[itm] = i;
                     itm++;
                 }
@@ -164,12 +168,11 @@ public final class LongstaffSchwartzEngine {
             }
         }
 
-        // Discount each path's chosen cashflow back to t=0 and average.
+        // Discount each path's chosen cashflow back to t=0 and average —
+        // table lookup, no per-path inner loop.
         double sum = 0.0;
         for(int i = 0; i < totalPaths; i++) {
-            double pv = cashflow[i];
-            for(int g = 0; g < exerciseTime[i]; g++) pv *= discountStep;
-            sum += pv;
+            sum += cashflow[i] * discountPow[exerciseTime[i]];
         }
         double price = sum / totalPaths;
 
