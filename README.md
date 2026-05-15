@@ -4,7 +4,7 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v2.3**
+**Current release: v2.4**
 
 Highlights since v1.0:
 
@@ -13,8 +13,8 @@ Highlights since v1.0:
 - Both **discrete** and **continuous** monitoring for the path-dependent types, including Brownian-bridge corrections.
 - **Multiple pricing engines** — Black-Scholes closed form, **Cox-Ross-Rubinstein binomial**, **Crank-Nicolson PDE**, **Heston (Fourier inversion)** alongside Monte Carlo and LSM.
 - **Auto mode**: trimmed mean of model outputs ("mean of the two middle outputs") — robust against a single misbehaving engine.
-- **Greeks** (Δ, Γ, ν, Θ, ρ) for every option type — closed-form for European, common-random-numbers finite differences for the others.
-- **Implied volatility** solver for **every** option type — closed-form for European, CRN-based MC / LSM solver for the rest.
+- **Greeks** (Δ, Γ, ν, Θ, ρ) **dispatched by the selected pricing model** — closed-form under BS, deterministic-pricer finite differences under Binomial / PDE / Heston, CRN-seeded MC / LSM finite differences for path-dependent + American; **Auto** trims across the σ-based models component-by-component.
+- **Implied volatility** solver **dispatched by the selected pricing model** — closed-form Newton + bisection for BS, Newton on the deterministic pricer for Binomial / PDE, `v₀` inversion (reported as `√v₀`) for Heston, CRN-seeded MC / LSM for path-dependent + American.
 - **Continuous dividend yield + discrete cash dividends** across every pricer.
 - Tabbed UI with a live 5/50/95% percentile chart + a payoff diagram on each tab. Launches **maximised by default**.
 - **HTTP/JSON API** so other applications can request prices, Greeks and implied vol over the network.
@@ -48,13 +48,23 @@ Every applicable engine can be selected explicitly. There is also an **Auto** mo
 | Asian / Barrier / Lookback | MC (path-dependent — no Auto) | — |
 
 ### Greeks & implied vol
-- **Greeks** (delta, gamma, vega, theta, rho) for every option type
-  - European: closed-form Black–Scholes
-  - Path-dependent / American: common-random-numbers (CRN) finite differences against seeded MC / LSM — variance stays in the bump, not the simulation
+- **Greeks** (delta, gamma, vega, theta, rho) for every option type, dispatched by the selected pricing model
+  - European + BS: closed-form Black–Scholes (instant)
+  - European + Binomial / PDE: central finite differences against the deterministic pricer (~8 repricings, ~30 ms each)
+  - European + Heston: finite differences on the Heston pricer; vega bumps σ₀ ≡ √v₀ and converts via chain rule so the value is reported in the practitioner per-1%-σ convention
+  - European + Auto: per-Greek trimmed mean across {BS, Binomial, PDE} — drops min and max, returns the median (or the average of the two middle values for ≥ 4 contributors)
+  - American + LSM: CRN-seeded LSM finite differences
+  - American + Binomial / PDE: deterministic-pricer finite differences
+  - American + Auto: per-Greek trimmed mean across {LSM, Binomial, PDE}
+  - Path-dependent (Asian / Barrier / Lookback): CRN-seeded MC finite differences
   - Output in practitioner conventions: vega per 1% σ, theta per day, rho per 1% rate
-- **Implied volatility** solver for every option type
-  - European: Newton-Raphson with analytic vega + bisection fallback
-  - Path-dependent / American: CRN-seeded pricer so each σ candidate is a deterministic, smooth function of σ (no MC noise across iterations); Newton-Raphson with finite-difference vega; bisection fallback on a pre-checked `[σ_lo, σ_hi]` bracket
+- **Implied volatility** solver for every option type, also dispatched by model
+  - European + BS / Auto: Newton-Raphson with analytic BS vega + bisection fallback (closed-form, sub-millisecond)
+  - European + Binomial / PDE: Newton on the deterministic pricer with finite-difference vega + bisection on the same bracket
+  - European + Heston: solves for `v₀` and reports `σ = √v₀` so the value reads as a regular vol — natural Heston IV
+  - American + LSM / Auto: CRN-seeded LSM inversion
+  - American + Binomial / PDE: Newton on the deterministic pricer
+  - Path-dependent: CRN-seeded MC inversion
   - Pre-flight no-arbitrage / reachability check on the target price
   - Caveat: for options whose price is non-monotonic in σ (e.g. up-and-out calls), the solver returns one valid root — there may be a second
 
@@ -223,12 +233,12 @@ All bodies accept an optional **`dividends`** field of the shape:
 
 Both `continuousYield` and `discrete` are independently optional; omit either or both. Times are in years from today.
 
-**Pricing-model selector** — `/price/european` and `/price/american` accept an optional `model` field. Allowed values:
+**Pricing-model selector** — `/price/*`, `/greeks/*` and `/implied-vol/*` for European and American accept an optional `model` field. Allowed values:
 
-| Endpoint | `model` values | Default |
-|----------|----------------|---------|
-| `/price/european` | `BS`, `BINOMIAL`, `PDE`, `HESTON`, `AUTO` | `BS` |
-| `/price/american` | `LSM`, `BINOMIAL`, `PDE`, `AUTO` | `LSM` |
+| Endpoint family | `model` values | Default |
+|-----------------|----------------|---------|
+| `/price/european`, `/greeks/european`, `/implied-vol/european` | `BS`, `BINOMIAL`, `PDE`, `HESTON`, `AUTO` | `BS` |
+| `/price/american`, `/greeks/american`, `/implied-vol/american` | `LSM`, `BINOMIAL`, `PDE`, `AUTO` | `LSM` |
 
 When `model=HESTON`, the body must also include a `heston` object:
 ```json
@@ -434,14 +444,14 @@ curl -s -X POST -H "Content-Type: application/json" \
 - Discrete-dividend handling in the closed-form / tree / PDE engines uses the escrowed model — exact for the standard convention, but not the only valid approach
 - For options non-monotone in σ (most notably up-and-out and down-and-out calls), the IV solver returns one valid root — there can be a second on the same target price
 - Binomial / PDE / Heston engines apply only to European and (for binomial/PDE) American payoffs; the path-dependent option types remain MC-only
-- Greeks / implied vol still use the engines from v2.2 (closed-form BS for European, CRN MC/LSM for the rest) — they do not yet dispatch by `model`
+- For options whose price is non-monotonic in σ (e.g. up-and-out calls) the IV solver returns one valid root — there may be a second
+- IV solver floors σ at 1% (covers every real-world option; avoids the CRR binomial parametrisation degeneracy when `|r-q|·√Δt > σ·√Δt`)
 - No API authentication — bind to localhost or front with a reverse proxy in any non-trivial deployment
 
 ## Roadmap
 
 Possible future improvements:
 
-- model-aware Greeks and implied volatility (currently they always use the v2.2 engines regardless of the price selector)
 - Heston for path-dependent payoffs via two-factor MC
 - volatility surface fitter (term structure + skew)
 - batch-pricing endpoint on the API

@@ -336,16 +336,22 @@ public class MonteCarloPanel extends JPanel {
 
 
     /**
-     * MC Greeks need 8 re-prices — run them off the EDT so the UI stays
-     * responsive. Show "…" placeholders while computing.
+     * MC Greeks need ~8 re-prices — run them off the EDT so the UI stays
+     * responsive. Show "…" placeholders while computing. For American the
+     * chosen model is honoured.
      */
     private void computeGreeksAsync(Option option, double spot, double rate, double vol,
                                     DividendSchedule dividends) {
         greeksPanel.setComputing();
         priceButton.setEnabled(false);
 
+        final PricingModel americanModel = (option instanceof AmericanOption) ? parseAmericanModel() : null;
+
         new SwingWorker<Greeks, Void>() {
             @Override protected Greeks doInBackground() {
+                if(option instanceof AmericanOption am) {
+                    return GreeksCalculator.compute(am, spot, rate, vol, dividends, americanModel);
+                }
                 return GreeksCalculator.compute(option, spot, rate, vol, dividends);
             }
             @Override protected void done() {
@@ -357,6 +363,16 @@ public class MonteCarloPanel extends JPanel {
                 }
             }
         }.execute();
+    }
+
+
+    private PricingModel parseAmericanModel() {
+        return switch((String) americanModelCombo.getSelectedItem()) {
+            case "Longstaff-Schwartz" -> PricingModel.LSM;
+            case "Binomial"           -> PricingModel.BINOMIAL;
+            case "PDE"                -> PricingModel.PDE;
+            default                   -> PricingModel.AUTO;
+        };
     }
 
 
@@ -410,8 +426,13 @@ public class MonteCarloPanel extends JPanel {
         ivResultLabel.setText("Solving σ …");
         solveIvButton.setEnabled(false);
 
+        final PricingModel americanModel = (option instanceof AmericanOption) ? parseAmericanModel() : null;
+
         new SwingWorker<Double, Void>() {
             @Override protected Double doInBackground() {
+                if(option instanceof AmericanOption am) {
+                    return ImpliedVolatility.impliedVolatility(am, spot, rate, marketPrice, divs, americanModel);
+                }
                 return ImpliedVolatility.impliedVolatility(option, spot, rate, marketPrice, divs);
             }
             @Override protected void done() {

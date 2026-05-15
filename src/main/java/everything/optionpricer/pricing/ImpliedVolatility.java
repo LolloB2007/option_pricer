@@ -3,7 +3,9 @@ package everything.optionpricer.pricing;
 import everything.optionpricer.model.AmericanOption;
 import everything.optionpricer.model.DividendSchedule;
 import everything.optionpricer.model.EuropeanOption;
+import everything.optionpricer.model.HestonParams;
 import everything.optionpricer.model.Option;
+import everything.optionpricer.model.OptionType;
 import everything.optionpricer.model.PathDependentOption;
 
 import java.util.concurrent.ThreadLocalRandom;
@@ -37,7 +39,9 @@ public final class ImpliedVolatility {
     private static final int    MAX_BISECT = 200;
 
     // Engines reject σ <= 0 or σ >= 5; stay strictly inside that band.
-    private static final double SIGMA_LOWER = 1.0e-3;
+    // Floor at 1% — covers every real-world option and avoids the CRR binomial
+    // parametrisation degeneracy (p out of [0,1] when |r-q|·√dt > σ·√dt).
+    private static final double SIGMA_LOWER = 0.01;
     private static final double SIGMA_UPPER = 4.99;
 
     /** Defaults for MC / LSM IV — kept modest because we revaluate many times. */
@@ -185,6 +189,86 @@ public final class ImpliedVolatility {
         if(option instanceof PathDependentOption pd)   return impliedVolatility(pd, spot, r, marketPrice, dividends);
         if(option instanceof AmericanOption am)        return impliedVolatility(am, spot, r, marketPrice, dividends);
         throw new IllegalArgumentException("Unsupported option type: " + option.getClass().getSimpleName());
+    }
+
+
+    // ============================================================
+    //  Model-aware overloads
+    // ============================================================
+
+    /**
+     * Model-aware European IV. {@code BS} uses the closed-form Newton path
+     * with analytic vega; {@code BINOMIAL} / {@code PDE} use Newton on the
+     * deterministic pricer with FD vega; {@code HESTON} inverts on
+     * {@code v₀} (initial variance) holding the other Heston params fixed
+     * and returns {@code √v₀_implied} so the value reads as a vol number;
+     * {@code AUTO} falls back to the BS closed-form path.
+     */
+    public static double impliedVolatility(EuropeanOption option, double spot, double r,
+                                           double marketPrice, DividendSchedule dividends,
+                                           PricingModel model, HestonParams heston) {
+        if(dividends == null) dividends = DividendSchedule.NONE;
+        final DividendSchedule divs = dividends;
+        final OptionType type = option.getOptionType();
+        final double K = option.getStrikePrice();
+        final double T = option.getTimeToExpiry();
+
+        switch(model) {
+            case BS:
+            case AUTO:
+                return impliedVolatility(option, spot, r, marketPrice, divs);
+
+            case BINOMIAL: {
+                SigmaPricer pricer = s -> BinomialEngine.price(option, spot, r, s, divs).getPrice();
+                return solveWithCrn(pricer, marketPrice);
+            }
+            case PDE: {
+                SigmaPricer pricer = s -> FiniteDifferenceEngine.price(option, spot, r, s, divs).getPrice();
+                return solveWithCrn(pricer, marketPrice);
+            }
+            case HESTON: {
+                if(heston == null) throw new IllegalArgumentException("Heston IV requires Heston params");
+                // Solve on σ ≡ √v₀: build a HestonParams whose v₀ = σ².
+                SigmaPricer pricer = s -> {
+                    HestonParams h = new HestonParams(s * s, heston.kappa(), heston.theta(), heston.xi(), heston.rho());
+                    return HestonEngine.price(option, spot, r, h, divs).getPrice();
+                };
+                return solveWithCrn(pricer, marketPrice);
+            }
+            default:
+                throw new IllegalArgumentException("Model " + model + " is not applicable to European IV");
+        }
+    }
+
+
+    /**
+     * Model-aware American IV. {@code LSM} uses the CRN-seeded path
+     * (current behaviour); {@code BINOMIAL} / {@code PDE} use Newton on
+     * the deterministic pricer with FD vega; {@code AUTO} falls back to
+     * LSM.
+     */
+    public static double impliedVolatility(AmericanOption option, double spot, double r,
+                                           double marketPrice, DividendSchedule dividends,
+                                           PricingModel model) {
+        if(dividends == null) dividends = DividendSchedule.NONE;
+        final DividendSchedule divs = dividends;
+
+        switch(model) {
+            case LSM:
+            case AUTO:
+                return impliedVolatility(option, spot, r, marketPrice, divs);
+
+            case BINOMIAL: {
+                SigmaPricer pricer = s -> BinomialEngine.price(option, spot, r, s, divs).getPrice();
+                return solveWithCrn(pricer, marketPrice);
+            }
+            case PDE: {
+                SigmaPricer pricer = s -> FiniteDifferenceEngine.price(option, spot, r, s, divs).getPrice();
+                return solveWithCrn(pricer, marketPrice);
+            }
+            default:
+                throw new IllegalArgumentException("Model " + model + " is not applicable to American IV");
+        }
     }
 
 
