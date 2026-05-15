@@ -252,14 +252,42 @@ public class EuropeanPanel extends JPanel {
             showResult(String.format("Price: %.3f", price));
             modelDetailLabel.setText(detail);
 
-            // Greeks are always closed-form for European (independent of selected pricer).
-            Greeks g = GreeksCalculator.compute(option, spot, rate, vol, divs);
-            greeksPanel.setGreeks(g);
+            // Model-aware Greeks. BS is closed-form (instant); the others
+            // need multiple repricings — push them to a SwingWorker.
+            HestonParams hForGreeks = (model == PricingModel.HESTON) ? parseHestonParams() : null;
+            computeGreeksAsync(option, spot, rate, vol, divs, model, hForGreeks);
 
             payoffChart.setInputs(spot, strike, rate, vol, time, type);
         } catch(IllegalArgumentException ex) {
             showResult(ex.getMessage() != null ? ex.getMessage() : INVALID_INPUT_MSG);
         }
+    }
+
+
+    private void computeGreeksAsync(EuropeanOption option, double spot, double rate, double vol,
+                                    DividendSchedule divs, PricingModel model, HestonParams heston) {
+        if(model == PricingModel.BS) {
+            // Closed-form path — synchronous.
+            Greeks g = GreeksCalculator.compute(option, spot, rate, vol, divs, PricingModel.BS, null);
+            greeksPanel.setGreeks(g);
+            return;
+        }
+        greeksPanel.setComputing();
+        priceButton.setEnabled(false);
+
+        new SwingWorker<Greeks, Void>() {
+            @Override protected Greeks doInBackground() {
+                return GreeksCalculator.compute(option, spot, rate, vol, divs, model, heston);
+            }
+            @Override protected void done() {
+                priceButton.setEnabled(true);
+                try {
+                    greeksPanel.setGreeks(get());
+                } catch(Exception e) {
+                    greeksPanel.clear();
+                }
+            }
+        }.execute();
     }
 
 
@@ -308,11 +336,48 @@ public class EuropeanPanel extends JPanel {
                 ? DividendSchedule.NONE
                 : DividendSchedule.continuous(divYield);
 
+        PricingModel model = parseSelectedModel();
+        HestonParams h = null;
+        if(model == PricingModel.HESTON) {
+            try { h = parseHestonParams(); }
+            catch(IllegalArgumentException ex) {
+                ivResultLabel.setForeground(new java.awt.Color(0xFB923C));
+                ivResultLabel.setText(ex.getMessage());
+                return;
+            }
+        }
+        final HestonParams heston = h;
+
         try {
             EuropeanOption option = EuropeanOption.of(type, strike, time);
-            double iv = ImpliedVolatility.impliedVolatility(option, spot, rate, marketPrice, divs);
-            ivResultLabel.setForeground(new java.awt.Color(0xB8BCC9));
-            ivResultLabel.setText(String.format("Implied σ = %.4f  (%.2f%%)", iv, iv * 100.0));
+            // BS path is instant; Binomial/PDE/Heston take ~tens of ms each
+            // and the IV solver makes several calls — push off the EDT.
+            if(model == PricingModel.BS || model == PricingModel.AUTO) {
+                double iv = ImpliedVolatility.impliedVolatility(option, spot, rate, marketPrice, divs, model, heston);
+                ivResultLabel.setForeground(new java.awt.Color(0xB8BCC9));
+                ivResultLabel.setText(String.format("Implied σ = %.4f  (%.2f%%)", iv, iv * 100.0));
+                return;
+            }
+            ivResultLabel.setForeground(new java.awt.Color(0x9094A8));
+            ivResultLabel.setText("Solving σ …");
+            solveIvButton.setEnabled(false);
+            new SwingWorker<Double, Void>() {
+                @Override protected Double doInBackground() {
+                    return ImpliedVolatility.impliedVolatility(option, spot, rate, marketPrice, divs, model, heston);
+                }
+                @Override protected void done() {
+                    solveIvButton.setEnabled(true);
+                    try {
+                        double iv = get();
+                        ivResultLabel.setForeground(new java.awt.Color(0xB8BCC9));
+                        ivResultLabel.setText(String.format("Implied σ = %.4f  (%.2f%%)  [model: %s]", iv, iv * 100.0, model));
+                    } catch(Exception ex) {
+                        Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+                        ivResultLabel.setForeground(new java.awt.Color(0xFB923C));
+                        ivResultLabel.setText(cause.getMessage() != null ? cause.getMessage() : "Failed");
+                    }
+                }
+            }.execute();
         } catch(IllegalArgumentException ex) {
             ivResultLabel.setForeground(new java.awt.Color(0xFB923C));
             ivResultLabel.setText(ex.getMessage());

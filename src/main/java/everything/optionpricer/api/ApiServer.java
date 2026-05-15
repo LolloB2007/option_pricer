@@ -103,7 +103,7 @@ public final class ApiServer {
     public record ImpliedVolRequest(
             String type, double spot, double strike,
             double rate, double timeToExpiry, double marketPrice,
-            DividendsDto dividends) {}
+            DividendsDto dividends, String model, HestonParamsDto heston) {}
 
     public record ImpliedVolAsianRequest(
             String type, double spot, double strike,
@@ -127,7 +127,8 @@ public final class ApiServer {
     public record ImpliedVolAmericanRequest(
             String type, double spot, double strike,
             double rate, double timeToExpiry, double marketPrice,
-            int exerciseDates, Integer simulations, DividendsDto dividends) {}
+            int exerciseDates, Integer simulations, DividendsDto dividends,
+            String model) {}
 
     /**
      * Dividend specification — both fields optional. Continuous yield in
@@ -437,9 +438,25 @@ public final class ApiServer {
         EuropeanRequest req = readJson(ex, EuropeanRequest.class);
         EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
         DividendSchedule divs = toSchedule(req.dividends);
-        PricingResult res = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs);
-        Greeks g = GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs);
-        sendJson(ex, 200, new PriceAndGreeksResponse(res.getPrice(), g));
+        PricingModel model = parseModel(req.model, PricingModel.BS);
+        HestonParams heston = (model == PricingModel.HESTON || req.heston != null) ? toHestonParams(req.heston) : null;
+
+        double price;
+        switch(model) {
+            case BS       -> price = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+            case BINOMIAL -> price = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+            case PDE      -> price = FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+            case HESTON   -> price = HestonEngine.price(opt, req.spot, req.rate, heston, divs).getPrice();
+            case AUTO     -> price = MultiModelPrice.builder()
+                    .add(PricingModel.BS,       BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                    .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                    .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                    .build().price();
+            default       -> throw new IllegalArgumentException("model " + model + " not applicable to European");
+        }
+
+        Greeks g = GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs, model, heston);
+        sendJson(ex, 200, new PriceAndGreeksResponse(price, g));
     }
 
     private static void greeksAsian(HttpExchange ex) throws IOException {
@@ -472,12 +489,31 @@ public final class ApiServer {
         AmericanOption opt = new AmericanOption(
                 req.strike, req.timeToExpiry, parseType(req.type), req.exerciseDates);
         DividendSchedule divs = toSchedule(req.dividends);
-        double price = (req.simulations != null)
-                ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
-                : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+        PricingModel model = parseModel(req.model, PricingModel.LSM);
+
+        double price;
+        switch(model) {
+            case LSM -> price = (req.simulations != null)
+                    ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
+                    : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+            case BINOMIAL -> price = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+            case PDE      -> price = FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+            case AUTO -> {
+                double lsm = (req.simulations != null)
+                        ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
+                        : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                price = MultiModelPrice.builder()
+                        .add(PricingModel.LSM, lsm)
+                        .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                        .add(PricingModel.PDE, FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                        .build().price();
+            }
+            default -> throw new IllegalArgumentException("model " + model + " not applicable to American");
+        }
+
         Greeks g = (req.simulations != null)
-                ? GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
-                : GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs);
+                ? GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, req.simulations, divs, model)
+                : GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs, model);
         sendJson(ex, 200, new PriceAndGreeksResponse(price, g));
     }
 
@@ -490,8 +526,23 @@ public final class ApiServer {
         ImpliedVolRequest req = readJson(ex, ImpliedVolRequest.class);
         EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
         DividendSchedule divs = toSchedule(req.dividends);
-        double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs);
-        double pAt = BlackScholesEngine.price(opt, req.spot, req.rate, iv, divs).getPrice();
+        PricingModel model = parseModel(req.model, PricingModel.BS);
+        HestonParams heston = (model == PricingModel.HESTON || req.heston != null) ? toHestonParams(req.heston) : null;
+
+        double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, model, heston);
+
+        // Re-price at the solved σ using the same model so the caller sees how close we landed.
+        double pAt;
+        switch(model) {
+            case BS, AUTO -> pAt = BlackScholesEngine.price(opt, req.spot, req.rate, iv, divs).getPrice();
+            case BINOMIAL -> pAt = BinomialEngine.price(opt, req.spot, req.rate, iv, divs).getPrice();
+            case PDE      -> pAt = FiniteDifferenceEngine.price(opt, req.spot, req.rate, iv, divs).getPrice();
+            case HESTON -> {
+                HestonParams hSolved = new HestonParams(iv * iv, heston.kappa(), heston.theta(), heston.xi(), heston.rho());
+                pAt = HestonEngine.price(opt, req.spot, req.rate, hSolved, divs).getPrice();
+            }
+            default -> throw new IllegalArgumentException("model " + model + " not applicable to European IV");
+        }
         sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
     }
 
@@ -541,9 +592,26 @@ public final class ApiServer {
         AmericanOption opt = new AmericanOption(
                 req.strike, req.timeToExpiry, parseType(req.type), req.exerciseDates);
         DividendSchedule divs = toSchedule(req.dividends);
+        PricingModel model = parseModel(req.model, PricingModel.LSM);
         int paths = req.simulations != null ? req.simulations : ImpliedVolatility.DEFAULT_LSM_PATHS;
-        double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, paths);
-        double pAt = LongstaffSchwartzEngine.price(opt, req.spot, req.rate, iv, paths, divs).getPrice();
+
+        double iv;
+        double pAt;
+        switch(model) {
+            case LSM, AUTO -> {
+                iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, paths);
+                pAt = LongstaffSchwartzEngine.price(opt, req.spot, req.rate, iv, paths, divs).getPrice();
+            }
+            case BINOMIAL -> {
+                iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, model);
+                pAt = BinomialEngine.price(opt, req.spot, req.rate, iv, divs).getPrice();
+            }
+            case PDE -> {
+                iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, model);
+                pAt = FiniteDifferenceEngine.price(opt, req.spot, req.rate, iv, divs).getPrice();
+            }
+            default -> throw new IllegalArgumentException("model " + model + " not applicable to American IV");
+        }
         sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
     }
 
