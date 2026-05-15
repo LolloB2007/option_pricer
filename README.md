@@ -4,13 +4,15 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v2.2**
+**Current release: v2.3**
 
 Highlights since v1.0:
 
 - Path-dependent options (Asian, Barrier, Lookback) priced by a parallel antithetic Monte Carlo engine.
 - American options priced by **Longstaff–Schwartz** regression Monte Carlo.
 - Both **discrete** and **continuous** monitoring for the path-dependent types, including Brownian-bridge corrections.
+- **Multiple pricing engines** — Black-Scholes closed form, **Cox-Ross-Rubinstein binomial**, **Crank-Nicolson PDE**, **Heston (Fourier inversion)** alongside Monte Carlo and LSM.
+- **Auto mode**: trimmed mean of model outputs ("mean of the two middle outputs") — robust against a single misbehaving engine.
 - **Greeks** (Δ, Γ, ν, Θ, ρ) for every option type — closed-form for European, common-random-numbers finite differences for the others.
 - **Implied volatility** solver for **every** option type — closed-form for European, CRN-based MC / LSM solver for the rest.
 - **Continuous dividend yield + discrete cash dividends** across every pricer.
@@ -29,11 +31,21 @@ The application can be used in two ways:
 ## Features
 
 ### Pricing
-- **European Call & Put** via closed-form **Black–Scholes**
-- **Asian** — arithmetic or geometric, discrete or continuous monitoring
+- **European Call & Put** — pick from closed-form **Black-Scholes**, **Cox-Ross-Rubinstein binomial tree**, **Crank-Nicolson PDE**, or **Heston** (stochastic volatility) via Fourier inversion
+- **Asian** — arithmetic or geometric, discrete or continuous monitoring (Monte Carlo)
 - **Barrier** — up/down × in/out, discrete or continuous monitoring (Brownian-bridge survival probability)
 - **Lookback** — fixed or floating strike, discrete or continuous monitoring (Brownian-bridge max/min sampling)
-- **American** — Longstaff–Schwartz least-squares Monte Carlo
+- **American** — pick from **Longstaff-Schwartz** Monte Carlo, **CRR binomial tree**, or **Crank-Nicolson PDE** (the binomial / PDE engines also handle early-exercise via the standard `max(V, intrinsic)` projection)
+
+### Pricing model selector
+
+Every applicable engine can be selected explicitly. There is also an **Auto** mode that runs all engines applicable to the chosen option type, drops the smallest and largest outputs, and averages the rest — the "mean of the two middle outputs" once a fourth engine is in the mix (degenerates to the median for three). Robust against a single misbehaving engine.
+
+| Option type | Engines that apply | Auto trims across |
+|-------------|--------------------|-------------------|
+| European    | BS, Binomial, PDE, Heston | BS, Binomial, PDE |
+| American    | LSM, Binomial, PDE | LSM, Binomial, PDE |
+| Asian / Barrier / Lookback | MC (path-dependent — no Auto) | — |
 
 ### Greeks & implied vol
 - **Greeks** (delta, gamma, vega, theta, rho) for every option type
@@ -64,8 +76,8 @@ The application can be used in two ways:
 ### UI
 - Tabbed Swing GUI styled with **FlatLaf** (dark) + custom theme tweaks
 - Launches **maximised** by default
-- **European** tab: Black–Scholes form with closed-form Greeks and an inline implied-vol solver
-- **Monte Carlo** tab: segmented method picker (Asian / Barrier / Lookback / American), card-based form layout, method-specific inputs, async Greeks via SwingWorker, async implied-vol solver via SwingWorker
+- **European** tab: pricing-model dropdown (Auto / BS / Binomial / PDE / Heston); a Heston-params sub-card slides in when Heston is selected; inline implied-vol solver below
+- **Monte Carlo** tab: segmented method picker (Asian / Barrier / Lookback / American); for the American method, a model dropdown (Auto / LSM / Binomial / PDE); async Greeks and implied-vol via SwingWorker
 - **Payoff diagram** on every tab — intrinsic-at-maturity hockey stick + smooth current-value curve, with S₀ guide line and K marker
 - Analytic **5 / 50 / 95% percentile chart** of the option's value over time, with a filled uncertainty band
 - **Hover readout** on the percentile chart — vertical crosshair, dots at the three lines, tooltip with exact values at the cursor's time
@@ -211,6 +223,27 @@ All bodies accept an optional **`dividends`** field of the shape:
 
 Both `continuousYield` and `discrete` are independently optional; omit either or both. Times are in years from today.
 
+**Pricing-model selector** — `/price/european` and `/price/american` accept an optional `model` field. Allowed values:
+
+| Endpoint | `model` values | Default |
+|----------|----------------|---------|
+| `/price/european` | `BS`, `BINOMIAL`, `PDE`, `HESTON`, `AUTO` | `BS` |
+| `/price/american` | `LSM`, `BINOMIAL`, `PDE`, `AUTO` | `LSM` |
+
+When `model=HESTON`, the body must also include a `heston` object:
+```json
+"heston": { "v0": 0.04, "kappa": 1.5, "theta": 0.04, "xi": 0.30, "rho": -0.7 }
+```
+
+When `model=AUTO`, the response includes the per-model contributions:
+```json
+{
+  "price": 10.4486,
+  "model": "AUTO",
+  "contributions": { "BS": 10.4506, "BINOMIAL": 10.4486, "PDE": 10.4481 }
+}
+```
+
 **European**
 ```json
 {
@@ -315,7 +348,29 @@ curl -s -X POST -H "Content-Type: application/json" \
      -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
           "dividends":{"continuousYield":0.03}}' \
      http://localhost:8080/price/european
-# → {"price":8.652526401581632}
+# → {"price":8.652526401581632,"model":"BS"}
+
+# Same call priced with CRR binomial
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "model":"BINOMIAL"}' \
+     http://localhost:8080/price/european
+# → {"price":10.4486,"model":"BINOMIAL"}
+
+# Heston stochastic vol
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "model":"HESTON",
+          "heston":{"v0":0.04,"kappa":1.5,"theta":0.04,"xi":0.30,"rho":-0.7}}' \
+     http://localhost:8080/price/european
+# → {"price":10.3619,"model":"HESTON"}
+
+# Auto-mode trimmed mean — also returns per-model contributions
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"PUT","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "exerciseDates":50,"model":"AUTO"}' \
+     http://localhost:8080/price/american
+# → {"price":6.0861,"model":"AUTO","contributions":{"LSM":6.053,"BINOMIAL":6.090,"PDE":6.086}}
 
 # European Greeks
 curl -s -X POST -H "Content-Type: application/json" \
@@ -376,16 +431,18 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 ## Current Limitations
 
-- Discrete-dividend handling in BS uses the escrowed model — exact for the standard convention, but not the only valid approach
+- Discrete-dividend handling in the closed-form / tree / PDE engines uses the escrowed model — exact for the standard convention, but not the only valid approach
 - For options non-monotone in σ (most notably up-and-out and down-and-out calls), the IV solver returns one valid root — there can be a second on the same target price
-- No model alternatives beyond Black–Scholes / GBM Monte Carlo (e.g. no Heston, Binomial, PDE)
+- Binomial / PDE / Heston engines apply only to European and (for binomial/PDE) American payoffs; the path-dependent option types remain MC-only
+- Greeks / implied vol still use the engines from v2.2 (closed-form BS for European, CRN MC/LSM for the rest) — they do not yet dispatch by `model`
 - No API authentication — bind to localhost or front with a reverse proxy in any non-trivial deployment
 
 ## Roadmap
 
 Possible future improvements:
 
-- add more pricing models (Binomial, Heston, finite-difference PDE)
+- model-aware Greeks and implied volatility (currently they always use the v2.2 engines regardless of the price selector)
+- Heston for path-dependent payoffs via two-factor MC
 - volatility surface fitter (term structure + skew)
 - batch-pricing endpoint on the API
 - API authentication for non-local deployments
