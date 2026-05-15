@@ -4,7 +4,7 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v2.5**
+**Current release: v3.0**
 
 Highlights since v1.0:
 
@@ -14,6 +14,7 @@ Highlights since v1.0:
 - **Multiple pricing engines** — Black-Scholes closed form, **Cox-Ross-Rubinstein binomial**, **Crank-Nicolson PDE**, **Heston (Fourier inversion)** alongside Monte Carlo and LSM.
 - **Heston Monte Carlo** for path-dependent options (Asian, Barrier, Lookback) — two-factor full-truncation Euler discretisation; antithetic + parallel.
 - **Volatility surface fitter** — inverts a list of market quotes into a 2D implied-vol surface with strike skew and term structure; linear-in-strike, linear-in-time interpolation.
+- **API bearer-token authentication** — enable with `--token <value>` or the `OPTIONPRICER_API_TOKEN` env var. Constant-time token comparison; 401 with `WWW-Authenticate: Bearer` on failure. `/health` and `OPTIONS` preflight stay open.
 - **Auto mode**: trimmed mean of model outputs ("mean of the two middle outputs") — robust against a single misbehaving engine.
 - **Greeks** (Δ, Γ, ν, Θ, ρ) **dispatched by the selected pricing model** — closed-form under BS, deterministic-pricer finite differences under Binomial / PDE / Heston, CRN-seeded MC / LSM finite differences for path-dependent + American; **Auto** trims across the σ-based models component-by-component.
 - **Implied volatility** solver **dispatched by the selected pricing model** — closed-form Newton + bisection for BS, Newton on the deterministic pricer for Binomial / PDE, `v₀` inversion (reported as `√v₀`) for Heston, CRN-seeded MC / LSM for path-dependent + American.
@@ -170,7 +171,19 @@ java -jar target/OptionPricer-1.0-SNAPSHOT.jar
 java -jar target/OptionPricer-1.0-SNAPSHOT.jar --api 8080
 ```
 
-The server listens on the given port (defaults to 8080 if omitted).
+The server listens on the given port (defaults to 8080 if omitted). With no token configured, **every endpoint is open** — use this for localhost dev only.
+
+For any non-trivial deployment enable bearer-token auth:
+
+```bash
+java -jar target/OptionPricer-1.0-SNAPSHOT.jar --api 8080 --token sk_secret_xyz
+# or via env var
+OPTIONPRICER_API_TOKEN=sk_secret_xyz java -jar target/OptionPricer-1.0-SNAPSHOT.jar --api 8080
+```
+
+When a token is set, every endpoint except `/health` and `OPTIONS` preflight requires the header `Authorization: Bearer sk_secret_xyz`. Mismatches return HTTP 401 with `WWW-Authenticate: Bearer`. Comparisons are constant-time. The startup log makes it clear which mode you're in.
+
+Transport security (TLS / mTLS) is out of scope — terminate at a reverse proxy (nginx, Caddy, Cloudflare, etc.).
 
 ### Prebuilt v1.0 JAR
 
@@ -353,6 +366,21 @@ When `model=AUTO`, the response includes the per-model contributions:
 
 Every endpoint sends `Access-Control-Allow-Origin: *` and handles `OPTIONS` preflight, so the API is callable from a browser context (e.g. `fetch`).
 
+### Authentication
+
+If the server is started with `--token <value>` (or `OPTIONPRICER_API_TOKEN` is set in the environment), every endpoint **except `/health` and `OPTIONS` preflight** requires:
+
+```
+Authorization: Bearer <value>
+```
+
+- Wrong / missing / malformed header → **HTTP 401** with `WWW-Authenticate: Bearer` and a JSON body `{ "error": "missing or invalid Authorization header — expected: Bearer <token>" }`.
+- Token comparison is constant-time (`MessageDigest.isEqual`) to avoid timing leaks.
+- CORS headers are still emitted on 401 so browser-side `fetch` can read the error.
+- Without a token configured the server runs in **open mode** — intended for localhost dev only.
+
+Transport security is not implemented in-process — terminate TLS / mTLS at a reverse proxy.
+
 ### Examples
 
 ```bash
@@ -365,6 +393,13 @@ curl -s -X POST -H "Content-Type: application/json" \
      -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0}' \
      http://localhost:8080/price/european
 # → {"price":10.450575619322287}
+
+# Same call, server started with --token sk_secret_xyz
+curl -s -X POST -H "Content-Type: application/json" \
+     -H "Authorization: Bearer sk_secret_xyz" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0}' \
+     http://localhost:8080/price/european
+# → {"price":10.450575619322287,"model":"BS"}
 
 # Same call with a 3% continuous dividend yield
 curl -s -X POST -H "Content-Type: application/json" \
@@ -481,13 +516,11 @@ curl -s -X POST -H "Content-Type: application/json" \
 - The path-dependent Brownian-bridge corrections (continuous-monitoring Barrier / Lookback) assume constant σ — under Heston they become an approximation (`σ ≈ √θ`). Prefer discrete monitoring with a fine grid for Heston path-dependent
 - For options whose price is non-monotonic in σ (e.g. up-and-out calls) the IV solver returns one valid root — there may be a second
 - IV solver floors σ at 1% (covers every real-world option; avoids the CRR binomial parametrisation degeneracy when `|r-q|·√Δt > σ·√Δt`)
-- No API authentication — bind to localhost or front with a reverse proxy in any non-trivial deployment
+- TLS / mTLS is out of scope in-process — when exposing beyond localhost, terminate at a reverse proxy. Bearer-token authentication is built in (see [Authentication](#authentication)).
 
 ## Roadmap
 
-The project is essentially feature-complete. The only outstanding item that would matter for a real deployment:
-
-- **API authentication** — token or mTLS, needed before exposing the server beyond localhost.
+The project is feature-complete as of v3.0.
 
 ## Motivation
 
