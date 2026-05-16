@@ -28,7 +28,7 @@ import net.miginfocom.swing.MigLayout;
  *
  * @author lorenzobarbagelata
  */
-public class EuropeanPanel extends JPanel {
+public class EuropeanPanel extends ScrollableJPanel {
 
     private static final String INVALID_INPUT_MSG = "Please enter valid values in inputs";
 
@@ -51,7 +51,7 @@ public class EuropeanPanel extends JPanel {
 
 
     public EuropeanPanel() {
-        setLayout(new MigLayout(
+        super(new MigLayout(
                 "fillx, insets 24 28 24 28",
                 "[grow, fill]",
                 "[]10[]16[]12[]8[]10[]10[]"));

@@ -33,7 +33,7 @@ import net.miginfocom.swing.MigLayout;
  *
  * @author lorenzobarbagelata
  */
-public class MonteCarloPanel extends JPanel {
+public class MonteCarloPanel extends ScrollableJPanel {
 
     private static final String INVALID_INPUT_MSG = "Please enter valid values in inputs";
 
@@ -72,7 +72,7 @@ public class MonteCarloPanel extends JPanel {
 
 
     public MonteCarloPanel() {
-        setLayout(new MigLayout(
+        super(new MigLayout(
                 "fillx, insets 24 28 24 28",
                 "[grow, fill]",
                 "[]14[]14[]14[]10[]10[]8[]14[]10[]"
