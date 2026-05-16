@@ -4,7 +4,7 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v3.0**
+**Current release: v3.0.1**
 
 Highlights since v1.0:
 
@@ -185,9 +185,9 @@ When a token is set, every endpoint except `/health` and `OPTIONS` preflight req
 
 Transport security (TLS / mTLS) is out of scope — terminate at a reverse proxy (nginx, Caddy, Cloudflare, etc.).
 
-### Prebuilt v1.0 JAR
+### Prebuilt JAR
 
-[**Download release**](https://drive.google.com/file/d/1REndptovCK-ZLfrBIOfMd7VRly_QwX_W/view?usp=sharing) — note that you need to select the latest version.
+[**Download release**]([https://drive.google.com/drive/folders/1CB3HEip-fFKy7sxvxaY_SiWdSmCw3Uis?usp=sharing]) — note that you need to select the latest version.
 
 ## API
 
@@ -520,7 +520,7 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 ## Roadmap
 
-The project is feature-complete as of v3.0.
+The project is feature-complete as of v3.0.1.
 
 ## Motivation
 
