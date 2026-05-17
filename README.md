@@ -199,9 +199,9 @@ When a token is set, every endpoint except `/health` and `OPTIONS` preflight req
 
 Transport security (TLS / mTLS) is out of scope — terminate at a reverse proxy (nginx, Caddy, Cloudflare, etc.).
 
-### Prebuilt v1.0 JAR
+### Prebuilt JAR
 
-[**Download the v1.0 release**](https://drive.google.com/file/d/1REndptovCK-ZLfrBIOfMd7VRly_QwX_W/view?usp=sharing) — note this is the original European-only release; for the full feature set, build from source.
+[**Download release**]([https://drive.google.com/drive/folders/1CB3HEip-fFKy7sxvxaY_SiWdSmCw3Uis?usp=sharing]) — note that you need to select the latest version.
 
 ## API
 
