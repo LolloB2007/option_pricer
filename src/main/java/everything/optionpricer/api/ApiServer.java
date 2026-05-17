@@ -37,7 +37,10 @@ import java.io.Reader;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 
 /**
@@ -89,7 +92,7 @@ public final class ApiServer {
             double rate, double volatility, double timeToExpiry,
             int timeSteps, boolean discreteMonitoring, boolean arithmeticAverage,
             Integer simulations, DividendsDto dividends,
-            String model, HestonParamsDto heston) {}
+            String model, HestonParamsDto heston, Long seed) {}
 
     public record BarrierRequest(
             String type, double spot, double strike,
@@ -97,14 +100,14 @@ public final class ApiServer {
             int timeSteps, boolean discreteMonitoring,
             double barrier, boolean upBarrier, boolean inBarrier,
             Integer simulations, DividendsDto dividends,
-            String model, HestonParamsDto heston) {}
+            String model, HestonParamsDto heston, Long seed) {}
 
     public record LookbackRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
             int timeSteps, boolean discreteMonitoring, boolean fixedStrike,
             Integer simulations, DividendsDto dividends,
-            String model, HestonParamsDto heston) {}
+            String model, HestonParamsDto heston, Long seed) {}
 
     public record AmericanRequest(
             String type, double spot, double strike,
@@ -157,7 +160,7 @@ public final class ApiServer {
     public record ErrorResponse(String error)      {}
     public record HealthResponse(String status)    {}
     public record PriceAndGreeksResponse(double price, Greeks greeks) {}
-    public record ImpliedVolResponse(double impliedVolatility, double price) {}
+    public record ImpliedVolResponse(double impliedVolatility, double price, int iterations) {}
 
     public record VolSurfaceFitRequest(
             double spot, double rate, DividendsDto dividends,
@@ -170,6 +173,19 @@ public final class ApiServer {
     public record VolSurfaceFailureDto(QuoteDto quote, String reason) {}
 
     public record VolSurfaceFitResponse(VolSurfacePointDto[] points, VolSurfaceFailureDto[] failures) {}
+
+    // ----- Spread (multi-leg European) ----- //
+    public record SpreadLeg(String type, double strike, String side, double qty) {}
+
+    public record SpreadRequest(
+            double spot, double rate, double volatility, double timeToExpiry,
+            DividendsDto dividends,
+            SpreadLeg[] legs) {}
+
+    public record SpreadLegResult(String type, double strike, String side, double qty,
+                                  double price, Greeks greeks) {}
+
+    public record SpreadResponse(double netPrice, Greeks netGreeks, SpreadLegResult[] legs) {}
 
 
     // ===================================================================
@@ -197,31 +213,136 @@ public final class ApiServer {
     }
 
 
+    /** Set once at server start; flipped to true when {@code shutdown()} runs. */
+    private static volatile HttpServer        runningServer;
+    private static volatile ExecutorService   serverExecutor;
+    private static final AtomicBoolean        shuttingDown = new AtomicBoolean(false);
+    /** Server-side timestamp at which the warmup pricer call has completed. */
+    private static volatile boolean           ready = false;
+
+
     private static HttpServer startInternal(int port) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
 
-        server.createContext("/health",          wrap(ApiServer::health,           false));
-        server.createContext("/price/european",  wrap(ApiServer::priceEuropean,    true));
-        server.createContext("/price/asian",     wrap(ApiServer::priceAsian,       true));
-        server.createContext("/price/barrier",   wrap(ApiServer::priceBarrier,     true));
-        server.createContext("/price/lookback",  wrap(ApiServer::priceLookback,    true));
-        server.createContext("/price/american",  wrap(ApiServer::priceAmerican,    true));
-        server.createContext("/greeks/european", wrap(ApiServer::greeksEuropean,   true));
-        server.createContext("/greeks/asian",    wrap(ApiServer::greeksAsian,      true));
-        server.createContext("/greeks/barrier",  wrap(ApiServer::greeksBarrier,    true));
-        server.createContext("/greeks/lookback", wrap(ApiServer::greeksLookback,   true));
-        server.createContext("/greeks/american", wrap(ApiServer::greeksAmerican,   true));
-        server.createContext("/vol-surface/fit",  wrap(ApiServer::volSurfaceFit, true));
-        server.createContext("/implied-vol/european", wrap(ApiServer::impliedVolEuropean, true));
-        server.createContext("/implied-vol/asian",    wrap(ApiServer::impliedVolAsian,    true));
-        server.createContext("/implied-vol/barrier",  wrap(ApiServer::impliedVolBarrier,  true));
-        server.createContext("/implied-vol/lookback", wrap(ApiServer::impliedVolLookback, true));
-        server.createContext("/implied-vol/american", wrap(ApiServer::impliedVolAmerican, true));
+        // ----- Legacy (un-versioned) routes — keep current behaviour ----- //
+        register(server, "/health",          ApiServer::health,           false, /*v1*/ false);
+        register(server, "/price/european",  ApiServer::priceEuropean,    true,  false);
+        register(server, "/price/asian",     ApiServer::priceAsian,       true,  false);
+        register(server, "/price/barrier",   ApiServer::priceBarrier,     true,  false);
+        register(server, "/price/lookback",  ApiServer::priceLookback,    true,  false);
+        register(server, "/price/american",  ApiServer::priceAmerican,    true,  false);
+        register(server, "/greeks/european", ApiServer::greeksEuropean,   true,  false);
+        register(server, "/greeks/asian",    ApiServer::greeksAsian,      true,  false);
+        register(server, "/greeks/barrier",  ApiServer::greeksBarrier,    true,  false);
+        register(server, "/greeks/lookback", ApiServer::greeksLookback,   true,  false);
+        register(server, "/greeks/american", ApiServer::greeksAmerican,   true,  false);
+        register(server, "/vol-surface/fit", ApiServer::volSurfaceFit,    true,  false);
+        register(server, "/implied-vol/european", ApiServer::impliedVolEuropean, true, false);
+        register(server, "/implied-vol/asian",    ApiServer::impliedVolAsian,    true, false);
+        register(server, "/implied-vol/barrier",  ApiServer::impliedVolBarrier,  true, false);
+        register(server, "/implied-vol/lookback", ApiServer::impliedVolLookback, true, false);
+        register(server, "/implied-vol/american", ApiServer::impliedVolAmerican, true, false);
+
+        // ----- /v1/ routes — same handlers, structured error shape ----- //
+        register(server, "/v1/health",            ApiServer::health,             false, true);
+        register(server, "/v1/ready",             ApiServer::ready,              false, true);
+        register(server, "/v1/price/european",    ApiServer::priceEuropean,      true,  true);
+        register(server, "/v1/price/asian",       ApiServer::priceAsian,         true,  true);
+        register(server, "/v1/price/barrier",     ApiServer::priceBarrier,       true,  true);
+        register(server, "/v1/price/lookback",    ApiServer::priceLookback,      true,  true);
+        register(server, "/v1/price/american",    ApiServer::priceAmerican,      true,  true);
+        register(server, "/v1/greeks/european",   ApiServer::greeksEuropean,     true,  true);
+        register(server, "/v1/greeks/asian",      ApiServer::greeksAsian,        true,  true);
+        register(server, "/v1/greeks/barrier",    ApiServer::greeksBarrier,      true,  true);
+        register(server, "/v1/greeks/lookback",   ApiServer::greeksLookback,     true,  true);
+        register(server, "/v1/greeks/american",   ApiServer::greeksAmerican,     true,  true);
+        register(server, "/v1/vol-surface/fit",   ApiServer::volSurfaceFit,      true,  true);
+        register(server, "/v1/implied-vol/european", ApiServer::impliedVolEuropean, true, true);
+        register(server, "/v1/implied-vol/asian",    ApiServer::impliedVolAsian,    true, true);
+        register(server, "/v1/implied-vol/barrier",  ApiServer::impliedVolBarrier,  true, true);
+        register(server, "/v1/implied-vol/lookback", ApiServer::impliedVolLookback, true, true);
+        register(server, "/v1/implied-vol/american", ApiServer::impliedVolAmerican, true, true);
+
+        // ----- Bot-oriented v1-only endpoints ----- //
+        register(server, "/v1/batch/price/european",  Batch.priceEuropeanBatch,  true, true);
+        register(server, "/v1/batch/price/asian",     Batch.priceAsianBatch,     true, true);
+        register(server, "/v1/batch/price/barrier",   Batch.priceBarrierBatch,   true, true);
+        register(server, "/v1/batch/price/lookback",  Batch.priceLookbackBatch,  true, true);
+        register(server, "/v1/batch/price/american",  Batch.priceAmericanBatch,  true, true);
+        register(server, "/v1/batch/greeks/european", Batch.greeksEuropeanBatch, true, true);
+        register(server, "/v1/batch/greeks/american", Batch.greeksAmericanBatch, true, true);
+
+        register(server, "/v1/grid/european", Grid.european, true, true);
+        register(server, "/v1/grid/american", Grid.american, true, true);
+        register(server, "/v1/grid/asian",    Grid.asian,    true, true);
+        register(server, "/v1/grid/barrier",  Grid.barrier,  true, true);
+        register(server, "/v1/grid/lookback", Grid.lookback, true, true);
+
+        register(server, "/v1/price/spread",  ApiServer::priceSpread, true, true);
+
+        // ----- Observability (no auth, no /v1 — operational endpoints) ----- //
+        server.createContext("/metrics", ex -> {
+            addCorsHeaders(ex);
+            if(!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                ex.sendResponseHeaders(405, -1);
+                ex.close();
+                return;
+            }
+            byte[] body = Metrics.exposition().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "text/plain; version=0.0.4");
+            ex.sendResponseHeaders(200, body.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(body); }
+        });
 
         int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
-        server.setExecutor(Executors.newFixedThreadPool(threads));
+        serverExecutor = Executors.newFixedThreadPool(threads);
+        server.setExecutor(serverExecutor);
         server.start();
+        runningServer = server;
+
+        // Warm up the engines so /v1/ready can flip true before traffic.
+        // Tiny BS call exercises the JIT path. MC engines warm lazily on
+        // first real request — acceptable.
+        try {
+            BlackScholesEngine.price(EuropeanOption.call(100, 1.0), 100, 0.05, 0.20);
+            ready = true;
+        } catch(Exception ignored) {
+            ready = true;
+        }
+
+        // Graceful shutdown on SIGTERM / Ctrl-C.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> shutdown(5), "OptionPricer-shutdown"));
         return server;
+    }
+
+
+    /**
+     * Stop accepting new requests; wait up to {@code drainSeconds} for
+     * in-flight ones to finish; then shut down the executor.
+     */
+    public static void shutdown(int drainSeconds) {
+        if(!shuttingDown.compareAndSet(false, true)) return;
+        try {
+            if(runningServer != null) {
+                System.out.println("OptionPricer API draining for up to " + drainSeconds + "s …");
+                runningServer.stop(drainSeconds);
+            }
+            if(serverExecutor != null) {
+                serverExecutor.shutdown();
+                if(!serverExecutor.awaitTermination(drainSeconds, TimeUnit.SECONDS)) {
+                    serverExecutor.shutdownNow();
+                }
+            }
+        } catch(InterruptedException ie) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+
+    /** Register both `/v1/`-aware structured-error and legacy un-versioned handlers. */
+    private static void register(HttpServer server, String path, SafeHandler handler,
+                                 boolean requirePost, boolean structuredErrors) {
+        server.createContext(path, wrap(handler, requirePost, structuredErrors));
     }
 
 
@@ -230,54 +351,111 @@ public final class ApiServer {
     // ===================================================================
 
     @FunctionalInterface
-    private interface SafeHandler {
+    interface SafeHandler {
         void handle(HttpExchange ex) throws IOException;
     }
 
 
     /**
-     * Wrap a {@link SafeHandler} with CORS, method validation, and error
-     * mapping. If {@code requirePost} is true the handler only accepts POST
-     * (plus OPTIONS preflight).
+     * Wrap a {@link SafeHandler} with CORS, method validation, error
+     * mapping, metrics + structured request logging. If
+     * {@code requirePost} is true the handler only accepts POST (plus
+     * OPTIONS preflight). If {@code structuredErrors} is true (the
+     * {@code /v1/*} routes), error responses use the
+     * {@link ErrorEnvelopeV1} shape instead of the flat legacy shape.
      */
-    private static HttpHandler wrap(SafeHandler inner, boolean requirePost) {
+    private static HttpHandler wrap(SafeHandler inner, boolean requirePost, boolean structuredErrors) {
         return ex -> {
+            String path = ex.getRequestURI().getPath();
+            String httpMethod = ex.getRequestMethod();
+            String reqId = RequestLogger.newId();
+            ex.getResponseHeaders().add("X-Request-Id", reqId);
+
+            long startNs = System.nanoTime();
+            Metrics.onRequestStarted();
+            int statusForMetrics = 500;
+
             addCorsHeaders(ex);
-            String method = ex.getRequestMethod();
-
-            // Browsers send OPTIONS preflight without the Authorization header.
-            // CORS would break if we 401'd preflight.
-            if("OPTIONS".equalsIgnoreCase(method)) {
-                ex.sendResponseHeaders(204, -1);
-                return;
-            }
-
-            // Auth gate. /health is intentionally exempt so liveness probes
-            // don't need credentials.
-            if(apiToken != null && !"/health".equals(ex.getRequestURI().getPath())) {
-                if(!hasValidBearerToken(ex)) {
-                    ex.getResponseHeaders().add("WWW-Authenticate", "Bearer");
-                    sendJson(ex, 401, new ErrorResponse(
-                            "missing or invalid Authorization header — expected: Bearer <token>"));
+            try {
+                // Browsers send OPTIONS preflight without the Authorization header.
+                // CORS would break if we 401'd preflight.
+                if("OPTIONS".equalsIgnoreCase(httpMethod)) {
+                    ex.sendResponseHeaders(204, -1);
+                    statusForMetrics = 204;
                     return;
                 }
-            }
 
-            if(requirePost && !"POST".equalsIgnoreCase(method)) {
-                sendJson(ex, 405, new ErrorResponse("method not allowed; use POST"));
-                return;
-            }
+                // Auth gate. /health, /v1/health, /v1/ready, /metrics are
+                // intentionally exempt so liveness/readiness probes and
+                // metrics scrapers don't need credentials.
+                if(apiToken != null && !isAuthExempt(path)) {
+                    if(!hasValidBearerToken(ex)) {
+                        ex.getResponseHeaders().add("WWW-Authenticate", "Bearer");
+                        statusForMetrics = 401;
+                        emitError(ex, structuredErrors, 401, "UNAUTHORIZED", null,
+                                "missing or invalid Authorization header — expected: Bearer <token>");
+                        return;
+                    }
+                }
 
-            try {
+                if(requirePost && !"POST".equalsIgnoreCase(httpMethod)) {
+                    statusForMetrics = 405;
+                    emitError(ex, structuredErrors, 405, "METHOD_NOT_ALLOWED", null,
+                            "method not allowed; use POST");
+                    return;
+                }
+
                 inner.handle(ex);
+                statusForMetrics = 200;
+            } catch(ApiException ae) {
+                statusForMetrics = ae.status;
+                emitError(ex, structuredErrors, ae.status, ae.code, ae.field, ae.getMessage());
             } catch(IllegalArgumentException iae) {
-                sendJson(ex, 400, new ErrorResponse(iae.getMessage() == null ? "bad request" : iae.getMessage()));
+                statusForMetrics = 400;
+                emitError(ex, structuredErrors, 400, "INVALID_PARAMETER", null,
+                        iae.getMessage() == null ? "bad request" : iae.getMessage());
             } catch(Exception e) {
-                sendJson(ex, 500, new ErrorResponse(e.getClass().getSimpleName() + ": " + e.getMessage()));
+                statusForMetrics = 500;
+                emitError(ex, structuredErrors, 500, "INTERNAL_ERROR", null,
+                        e.getClass().getSimpleName() + ": " + e.getMessage());
             } finally {
+                long latencyNs = System.nanoTime() - startNs;
+                Metrics.onRequestFinished(Metrics.labelFor(path), statusForMetrics, latencyNs);
+                RequestLogger.log(reqId, httpMethod, path, statusForMetrics, latencyNs);
                 ex.close();
             }
         };
+    }
+
+
+    private static boolean isAuthExempt(String path) {
+        return "/health".equals(path) || "/v1/health".equals(path) || "/v1/ready".equals(path);
+    }
+
+
+    /**
+     * Serialise an error response in the right shape — structured
+     * envelope on {@code /v1/*} routes, flat legacy shape elsewhere.
+     */
+    private static void emitError(HttpExchange ex, boolean structured, int status,
+                                  String code, String field, String message) throws IOException {
+        if(structured) {
+            sendJson(ex, status, new ErrorEnvelopeV1(new ApiError(code, field, message)));
+        } else {
+            sendJson(ex, status, new ErrorResponse(message == null ? "bad request" : message));
+        }
+    }
+
+
+    /** Envelope shape for structured errors on /v1/* routes. */
+    public record ErrorEnvelopeV1(ApiError error) {}
+
+
+    private static void ready(HttpExchange ex) throws IOException {
+        if(!ready) {
+            throw new ApiException(503, "NOT_READY", "engines warming up");
+        }
+        sendJson(ex, 200, new HealthResponse("ready"));
     }
 
 
@@ -366,7 +544,7 @@ public final class ApiServer {
 
 
     /** Convert the JSON dividends DTO to the engine's {@link DividendSchedule}. */
-    private static DividendSchedule toSchedule(DividendsDto d) {
+    static DividendSchedule toSchedule(DividendsDto d) {
         if(d == null) return DividendSchedule.NONE;
         double q = d.continuousYield() == null ? 0.0 : d.continuousYield();
         DiscreteDividend[] disc = d.discrete();
@@ -392,6 +570,12 @@ public final class ApiServer {
 
     private static void priceEuropean(HttpExchange ex) throws IOException {
         EuropeanRequest req = readJson(ex, EuropeanRequest.class);
+        sendJson(ex, 200, dispatchPriceEuropean(req));
+    }
+
+
+    /** Body-producing variant of {@link #priceEuropean}, callable from Batch / Grid. */
+    static ModelPriceResponse dispatchPriceEuropean(EuropeanRequest req) {
         EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
         DividendSchedule divs = toSchedule(req.dividends);
         PricingModel model = parseModel(req.model, PricingModel.BS);
@@ -399,20 +583,20 @@ public final class ApiServer {
         switch(model) {
             case BS -> {
                 double p = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-                sendJson(ex, 200, new ModelPriceResponse(p, "BS", null));
+                return new ModelPriceResponse(p, "BS", null);
             }
             case BINOMIAL -> {
                 double p = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-                sendJson(ex, 200, new ModelPriceResponse(p, "BINOMIAL", null));
+                return new ModelPriceResponse(p, "BINOMIAL", null);
             }
             case PDE -> {
                 double p = FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-                sendJson(ex, 200, new ModelPriceResponse(p, "PDE", null));
+                return new ModelPriceResponse(p, "PDE", null);
             }
             case HESTON -> {
                 HestonParams h = toHestonParams(req.heston);
                 double p = HestonEngine.price(opt, req.spot, req.rate, h, divs).getPrice();
-                sendJson(ex, 200, new ModelPriceResponse(p, "HESTON", null));
+                return new ModelPriceResponse(p, "HESTON", null);
             }
             case AUTO -> {
                 MultiModelPrice.Builder b = MultiModelPrice.builder()
@@ -423,44 +607,53 @@ public final class ApiServer {
                     b.add(PricingModel.HESTON, HestonEngine.price(opt, req.spot, req.rate, toHestonParams(req.heston), divs).getPrice());
                 }
                 MultiModelPrice.Aggregated agg = b.build();
-                sendJson(ex, 200, new ModelPriceResponse(agg.price(), "AUTO", stringKeyed(agg.contributions())));
+                return new ModelPriceResponse(agg.price(), "AUTO", stringKeyed(agg.contributions()));
             }
-            default -> throw new IllegalArgumentException("model " + model + " is not applicable to European pricing");
+            default -> throw ApiException.unsupportedModel("model " + model + " is not applicable to European pricing");
         }
     }
 
 
     private static void priceAsian(HttpExchange ex) throws IOException {
-        AsianRequest req = readJson(ex, AsianRequest.class);
+        sendJson(ex, 200, dispatchPriceAsian(readJson(ex, AsianRequest.class)));
+    }
+
+    static ModelPriceResponse dispatchPriceAsian(AsianRequest req) {
         AsianOption opt = new AsianOption(
                 req.strike, req.timeToExpiry, parseType(req.type),
                 req.timeSteps, req.discreteMonitoring, req.arithmeticAverage);
         DividendSchedule divs = toSchedule(req.dividends);
-        sendJson(ex, 200, pricePathDependent(opt, req.spot, req.rate, req.volatility,
-                                             req.simulations, divs, req.model, req.heston));
+        return pricePathDependent(opt, req.spot, req.rate, req.volatility,
+                                  req.simulations, divs, req.model, req.heston, req.seed);
     }
 
 
     private static void priceBarrier(HttpExchange ex) throws IOException {
-        BarrierRequest req = readJson(ex, BarrierRequest.class);
+        sendJson(ex, 200, dispatchPriceBarrier(readJson(ex, BarrierRequest.class)));
+    }
+
+    static ModelPriceResponse dispatchPriceBarrier(BarrierRequest req) {
         BarrierOption opt = new BarrierOption(
                 req.strike, req.timeToExpiry, parseType(req.type),
                 req.timeSteps, req.discreteMonitoring,
                 req.barrier, req.upBarrier, req.inBarrier);
         DividendSchedule divs = toSchedule(req.dividends);
-        sendJson(ex, 200, pricePathDependent(opt, req.spot, req.rate, req.volatility,
-                                             req.simulations, divs, req.model, req.heston));
+        return pricePathDependent(opt, req.spot, req.rate, req.volatility,
+                                  req.simulations, divs, req.model, req.heston, req.seed);
     }
 
 
     private static void priceLookback(HttpExchange ex) throws IOException {
-        LookbackRequest req = readJson(ex, LookbackRequest.class);
+        sendJson(ex, 200, dispatchPriceLookback(readJson(ex, LookbackRequest.class)));
+    }
+
+    static ModelPriceResponse dispatchPriceLookback(LookbackRequest req) {
         LookbackOption opt = new LookbackOption(
                 req.strike, req.timeToExpiry, parseType(req.type),
                 req.timeSteps, req.discreteMonitoring, req.fixedStrike);
         DividendSchedule divs = toSchedule(req.dividends);
-        sendJson(ex, 200, pricePathDependent(opt, req.spot, req.rate, req.volatility,
-                                             req.simulations, divs, req.model, req.heston));
+        return pricePathDependent(opt, req.spot, req.rate, req.volatility,
+                                  req.simulations, divs, req.model, req.heston, req.seed);
     }
 
 
@@ -473,30 +666,44 @@ public final class ApiServer {
             everything.optionpricer.model.PathDependentOption opt,
             double spot, double rate, double sigma,
             Integer simulations, DividendSchedule divs,
-            String modelStr, HestonParamsDto hestonDto) {
+            String modelStr, HestonParamsDto hestonDto, Long seed) {
 
         PricingModel model = parseModel(modelStr, PricingModel.MC);
+        int sims = simulations != null ? simulations : 100_000;
         switch(model) {
             case MC -> {
-                double p = (simulations != null)
-                        ? MonteCarloEngine.price(opt, spot, rate, sigma, simulations, divs).getPrice()
-                        : MonteCarloEngine.price(opt, spot, rate, sigma, divs).getPrice();
+                double p;
+                if(seed != null) {
+                    p = MonteCarloEngine.priceSeeded(opt, spot, rate, sigma, sims, seed, divs).getPrice();
+                } else {
+                    p = (simulations != null)
+                            ? MonteCarloEngine.price(opt, spot, rate, sigma, simulations, divs).getPrice()
+                            : MonteCarloEngine.price(opt, spot, rate, sigma, divs).getPrice();
+                }
                 return new ModelPriceResponse(p, "MC", null);
             }
             case HESTON -> {
                 HestonParams h = toHestonParams(hestonDto);
-                double p = (simulations != null)
-                        ? HestonMonteCarloEngine.price(opt, spot, rate, h, simulations, divs).getPrice()
-                        : HestonMonteCarloEngine.price(opt, spot, rate, h, divs).getPrice();
+                double p;
+                if(seed != null) {
+                    p = HestonMonteCarloEngine.priceSeeded(opt, spot, rate, h, sims, seed, divs).getPrice();
+                } else {
+                    p = (simulations != null)
+                            ? HestonMonteCarloEngine.price(opt, spot, rate, h, simulations, divs).getPrice()
+                            : HestonMonteCarloEngine.price(opt, spot, rate, h, divs).getPrice();
+                }
                 return new ModelPriceResponse(p, "HESTON", null);
             }
-            default -> throw new IllegalArgumentException("model " + model + " is not applicable to path-dependent options");
+            default -> throw ApiException.unsupportedModel("model " + model + " is not applicable to path-dependent options");
         }
     }
 
 
     private static void priceAmerican(HttpExchange ex) throws IOException {
-        AmericanRequest req = readJson(ex, AmericanRequest.class);
+        sendJson(ex, 200, dispatchPriceAmerican(readJson(ex, AmericanRequest.class)));
+    }
+
+    static ModelPriceResponse dispatchPriceAmerican(AmericanRequest req) {
         AmericanOption opt = new AmericanOption(
                 req.strike, req.timeToExpiry, parseType(req.type), req.exerciseDates);
         DividendSchedule divs = toSchedule(req.dividends);
@@ -507,15 +714,15 @@ public final class ApiServer {
                 double p = (req.simulations != null)
                         ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
                         : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-                sendJson(ex, 200, new ModelPriceResponse(p, "LSM", null));
+                return new ModelPriceResponse(p, "LSM", null);
             }
             case BINOMIAL -> {
                 double p = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-                sendJson(ex, 200, new ModelPriceResponse(p, "BINOMIAL", null));
+                return new ModelPriceResponse(p, "BINOMIAL", null);
             }
             case PDE -> {
                 double p = FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-                sendJson(ex, 200, new ModelPriceResponse(p, "PDE", null));
+                return new ModelPriceResponse(p, "PDE", null);
             }
             case AUTO -> {
                 double lsm = (req.simulations != null)
@@ -526,9 +733,9 @@ public final class ApiServer {
                         .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
                         .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
                         .build();
-                sendJson(ex, 200, new ModelPriceResponse(agg.price(), "AUTO", stringKeyed(agg.contributions())));
+                return new ModelPriceResponse(agg.price(), "AUTO", stringKeyed(agg.contributions()));
             }
-            default -> throw new IllegalArgumentException("model " + model + " is not applicable to American pricing");
+            default -> throw ApiException.unsupportedModel("model " + model + " is not applicable to American pricing");
         }
     }
 
@@ -538,7 +745,10 @@ public final class ApiServer {
     // ===================================================================
 
     private static void greeksEuropean(HttpExchange ex) throws IOException {
-        EuropeanRequest req = readJson(ex, EuropeanRequest.class);
+        sendJson(ex, 200, dispatchGreeksEuropean(readJson(ex, EuropeanRequest.class)));
+    }
+
+    static PriceAndGreeksResponse dispatchGreeksEuropean(EuropeanRequest req) {
         EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
         DividendSchedule divs = toSchedule(req.dividends);
         PricingModel model = parseModel(req.model, PricingModel.BS);
@@ -555,11 +765,11 @@ public final class ApiServer {
                     .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
                     .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
                     .build().price();
-            default       -> throw new IllegalArgumentException("model " + model + " not applicable to European");
+            default       -> throw ApiException.unsupportedModel("model " + model + " not applicable to European");
         }
 
         Greeks g = GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs, model, heston);
-        sendJson(ex, 200, new PriceAndGreeksResponse(price, g));
+        return new PriceAndGreeksResponse(price, g);
     }
 
     private static void greeksAsian(HttpExchange ex) throws IOException {
@@ -588,7 +798,10 @@ public final class ApiServer {
     }
 
     private static void greeksAmerican(HttpExchange ex) throws IOException {
-        AmericanRequest req = readJson(ex, AmericanRequest.class);
+        sendJson(ex, 200, dispatchGreeksAmerican(readJson(ex, AmericanRequest.class)));
+    }
+
+    static PriceAndGreeksResponse dispatchGreeksAmerican(AmericanRequest req) {
         AmericanOption opt = new AmericanOption(
                 req.strike, req.timeToExpiry, parseType(req.type), req.exerciseDates);
         DividendSchedule divs = toSchedule(req.dividends);
@@ -611,13 +824,13 @@ public final class ApiServer {
                         .add(PricingModel.PDE, FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
                         .build().price();
             }
-            default -> throw new IllegalArgumentException("model " + model + " not applicable to American");
+            default -> throw ApiException.unsupportedModel("model " + model + " not applicable to American");
         }
 
         Greeks g = (req.simulations != null)
                 ? GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, req.simulations, divs, model)
                 : GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs, model);
-        sendJson(ex, 200, new PriceAndGreeksResponse(price, g));
+        return new PriceAndGreeksResponse(price, g);
     }
 
 
@@ -646,7 +859,7 @@ public final class ApiServer {
             }
             default -> throw new IllegalArgumentException("model " + model + " not applicable to European IV");
         }
-        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt, ImpliedVolatility.lastIterations()));
     }
 
 
@@ -659,7 +872,7 @@ public final class ApiServer {
         int sims = req.simulations != null ? req.simulations : ImpliedVolatility.DEFAULT_MC_SIMS;
         double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, sims);
         double pAt = MonteCarloEngine.price(opt, req.spot, req.rate, iv, sims, divs).getPrice();
-        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt, ImpliedVolatility.lastIterations()));
     }
 
 
@@ -673,7 +886,7 @@ public final class ApiServer {
         int sims = req.simulations != null ? req.simulations : ImpliedVolatility.DEFAULT_MC_SIMS;
         double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, sims);
         double pAt = MonteCarloEngine.price(opt, req.spot, req.rate, iv, sims, divs).getPrice();
-        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt, ImpliedVolatility.lastIterations()));
     }
 
 
@@ -686,7 +899,7 @@ public final class ApiServer {
         int sims = req.simulations != null ? req.simulations : ImpliedVolatility.DEFAULT_MC_SIMS;
         double iv = ImpliedVolatility.impliedVolatility(opt, req.spot, req.rate, req.marketPrice, divs, sims);
         double pAt = MonteCarloEngine.price(opt, req.spot, req.rate, iv, sims, divs).getPrice();
-        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt, ImpliedVolatility.lastIterations()));
     }
 
 
@@ -715,7 +928,7 @@ public final class ApiServer {
             }
             default -> throw new IllegalArgumentException("model " + model + " not applicable to American IV");
         }
-        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt));
+        sendJson(ex, 200, new ImpliedVolResponse(iv, pAt, ImpliedVolatility.lastIterations()));
     }
 
 
@@ -747,6 +960,52 @@ public final class ApiServer {
                 .toArray(VolSurfaceFailureDto[]::new);
 
         sendJson(ex, 200, new VolSurfaceFitResponse(points, failures));
+    }
+
+
+    // ===================================================================
+    //  /v1/price/spread — multi-leg European at one expiry.
+    //  Returns net premium (BUY = +leg, SELL = -leg) and aggregated Greeks.
+    // ===================================================================
+
+    private static void priceSpread(HttpExchange ex) throws IOException {
+        SpreadRequest req = readJson(ex, SpreadRequest.class);
+        if(req.legs == null || req.legs.length == 0)
+            throw ApiException.badField("legs", "must be a non-empty array");
+
+        DividendSchedule divs = toSchedule(req.dividends);
+        SpreadLegResult[] legResults = new SpreadLegResult[req.legs.length];
+        double netPrice = 0.0;
+        double netDelta = 0.0, netGamma = 0.0, netVega = 0.0, netTheta = 0.0, netRho = 0.0;
+
+        for(int i = 0; i < req.legs.length; i++) {
+            SpreadLeg leg = req.legs[i];
+            if(leg.strike <= 0)        throw ApiException.badField("legs[" + i + "].strike", "must be positive");
+            if(leg.qty <= 0)           throw ApiException.badField("legs[" + i + "].qty", "must be positive");
+            if(leg.side == null)       throw ApiException.badField("legs[" + i + "].side", "missing");
+            int sideSign = "SELL".equalsIgnoreCase(leg.side) ? -1
+                         : "BUY".equalsIgnoreCase(leg.side) ?  +1
+                         : 0;
+            if(sideSign == 0)
+                throw ApiException.badField("legs[" + i + "].side", "must be BUY or SELL");
+
+            EuropeanOption opt = EuropeanOption.of(parseType(leg.type), leg.strike, req.timeToExpiry);
+            double legPrice = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+            Greeks legGreeks = BlackScholesEngine.greeks(opt, req.spot, req.rate, req.volatility, divs);
+
+            double weight = sideSign * leg.qty;
+            netPrice += weight * legPrice;
+            netDelta += weight * legGreeks.delta();
+            netGamma += weight * legGreeks.gamma();
+            netVega  += weight * legGreeks.vega();
+            netTheta += weight * legGreeks.theta();
+            netRho   += weight * legGreeks.rho();
+
+            legResults[i] = new SpreadLegResult(leg.type, leg.strike, leg.side, leg.qty,
+                                                legPrice, legGreeks);
+        }
+        Greeks netGreeks = new Greeks(netDelta, netGamma, netVega, netTheta, netRho);
+        sendJson(ex, 200, new SpreadResponse(netPrice, netGreeks, legResults));
     }
 
 
