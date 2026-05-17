@@ -38,6 +38,17 @@ public final class ImpliedVolatility {
     private static final int    MAX_NEWTON = 80;
     private static final int    MAX_BISECT = 200;
 
+    /**
+     * Records the number of solver iterations (Newton steps + bisection
+     * steps) consumed by the most recent call on this thread. Cleared at
+     * the start of every solve. Used by {@code /v1/implied-vol/*} to
+     * surface {@code iterations} in the response.
+     */
+    private static final ThreadLocal<int[]> iterCounter = ThreadLocal.withInitial(() -> new int[1]);
+    private static void resetIters() { iterCounter.get()[0] = 0; }
+    private static void bumpIters()  { iterCounter.get()[0]++; }
+    public  static int  lastIterations() { return iterCounter.get()[0]; }
+
     // Engines reject σ <= 0 or σ >= 5; stay strictly inside that band.
     // Floor at 1% — covers every real-world option and avoids the CRR binomial
     // parametrisation degeneracy (p out of [0,1] when |r-q|·√dt > σ·√dt).
@@ -88,11 +99,13 @@ public final class ImpliedVolatility {
                     marketPrice, lower, upper));
         }
 
+        resetIters();
         double sigma = Math.sqrt(2.0 * Math.PI / T) * marketPrice / discS;
         if(!Double.isFinite(sigma) || sigma <= SIGMA_LOWER) sigma = 0.2;
         if(sigma > SIGMA_UPPER) sigma = SIGMA_UPPER * 0.5;
 
         for(int i = 0; i < MAX_NEWTON; i++) {
+            bumpIters();
             double price = BlackScholesEngine.price(option, spot, riskFreeRate, sigma, dividends).getPrice();
             double err   = price - marketPrice;
             if(Math.abs(err) < TOL) return sigma;
@@ -282,6 +295,7 @@ public final class ImpliedVolatility {
 
     private static double solveWithCrn(SigmaPricer pricer, double marketPrice) {
 
+        resetIters();
         // 1. Bracket check at the extremes.
         double pLo = pricer.price(SIGMA_LOWER);
         double pHi = pricer.price(SIGMA_UPPER);
@@ -306,6 +320,7 @@ public final class ImpliedVolatility {
         double sigma = 0.2;
         double dV = 0.005;
         for(int i = 0; i < MAX_NEWTON; i++) {
+            bumpIters();
             double price = pricer.price(sigma);
             double err   = price - marketPrice;
             if(Math.abs(err) < TOL) return sigma;
@@ -333,6 +348,7 @@ public final class ImpliedVolatility {
 
         double mid = fallback;
         for(int i = 0; i < MAX_BISECT; i++) {
+            bumpIters();
             mid = 0.5 * (lo + hi);
             double f = pricer.price(mid) - marketPrice;
             if(Math.abs(f) < TOL || (hi - lo) < 1e-10) return mid;

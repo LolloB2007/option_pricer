@@ -4,7 +4,7 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v3.0**
+**Current release: v3.1**
 
 Highlights since v1.0:
 
@@ -15,6 +15,20 @@ Highlights since v1.0:
 - **Heston Monte Carlo** for path-dependent options (Asian, Barrier, Lookback) — two-factor full-truncation Euler discretisation; antithetic + parallel.
 - **Volatility surface fitter** — inverts a list of market quotes into a 2D implied-vol surface with strike skew and term structure; linear-in-strike, linear-in-time interpolation.
 - **API bearer-token authentication** — enable with `--token <value>` or the `OPTIONPRICER_API_TOKEN` env var. Constant-time token comparison; 401 with `WWW-Authenticate: Bearer` on failure. `/health` and `OPTIONS` preflight stay open.
+
+### v3.1 — bot-oriented API surface
+
+- **Versioned API** — every endpoint also lives at `/v1/...`. Legacy un-versioned routes keep working unchanged.
+- **Structured errors** on `/v1/*` — `{ "error": { "code", "field?", "message" } }` with codes a client can match on (`INVALID_PARAMETER`, `NO_ARBITRAGE_BAND`, `UNSUPPORTED_MODEL`, `UNAUTHORIZED`, `METHOD_NOT_ALLOWED`, `MALFORMED_JSON`, `INTERNAL_ERROR`). Legacy routes keep the flat `{ "error": "..." }` shape.
+- **Batch endpoints** — `POST /v1/batch/{price,greeks}/<method>`. One HTTP round-trip for a whole option chain; per-element `{ ok, result | error }` envelope so one bad strike doesn't fail the batch.
+- **Grid pricing with path reuse** — `POST /v1/grid/<method>`. For path-dependent options (Asian / Barrier / Lookback), Monte Carlo paths are simulated once and the payoff is evaluated against the shared per-path statistics for every `(strike, type)` contract. ~100× speedup vs running N independent MC pricings.
+- **Multi-leg spread pricing** — `POST /v1/price/spread`. European legs at one expiry; returns net premium and aggregated Greeks, plus per-leg breakdown. Covers verticals / condors / butterflies / straddles / strangles.
+- **IV iteration count + reproducible MC** — every `/v1/implied-vol/*` response carries `iterations` (Newton + bisection steps). MC path-dependent endpoints accept optional `seed: <long>` for CRN reproducibility in tests / debugging.
+- **Observability**
+  - `GET /metrics` — Prometheus text format. `pricer_requests_total{endpoint,status}` counter, `pricer_request_seconds{endpoint}` histogram, `pricer_in_flight_requests` gauge.
+  - `GET /v1/ready` — flipped true once the JIT-warmup pricing call completes.
+  - **Structured request logging** — one JSON line per request: `{ ts, reqId, method, path, status, latencyMs }`. Every response also carries `X-Request-Id` for end-to-end correlation.
+  - **Graceful shutdown** — `SIGTERM` / Ctrl-C drains in-flight requests (up to 5s) before exit.
 - **Auto mode**: trimmed mean of model outputs ("mean of the two middle outputs") — robust against a single misbehaving engine.
 - **Greeks** (Δ, Γ, ν, Θ, ρ) **dispatched by the selected pricing model** — closed-form under BS, deterministic-pricer finite differences under Binomial / PDE / Heston, CRN-seeded MC / LSM finite differences for path-dependent + American; **Auto** trims across the σ-based models component-by-component.
 - **Implied volatility** solver **dispatched by the selected pricing model** — closed-form Newton + bisection for BS, Newton on the deterministic pricer for Binomial / PDE, `v₀` inversion (reported as `√v₀`) for Heston, CRN-seeded MC / LSM for path-dependent + American.
@@ -197,11 +211,25 @@ All endpoints accept and return `application/json`. Successful responses have th
 { "price": 10.450575619322287 }
 ```
 
-Errors return an HTTP 4xx/5xx status with:
+Errors return an HTTP 4xx/5xx status. On the legacy un-versioned routes the body is:
 
 ```json
 { "error": "human-readable message" }
 ```
+
+On the `/v1/*` routes the body is **structured** so a client can match on a code rather than parse a string:
+
+```json
+{ "error": { "code": "INVALID_PARAMETER", "field": "strike", "message": "..." } }
+```
+
+Codes the API emits today: `INVALID_PARAMETER`, `NO_ARBITRAGE_BAND`, `UNSUPPORTED_MODEL`, `UNAUTHORIZED`, `METHOD_NOT_ALLOWED`, `MALFORMED_JSON`, `INTERNAL_ERROR`. `NOT_READY` from `/v1/ready` while the engines are still warming up. `field` is non-null only when the error pins to a specific request field.
+
+Every response also carries `X-Request-Id` — pair it with the server's structured log line for end-to-end correlation.
+
+### Versioning
+
+Every endpoint is registered at **both** its legacy path (`/price/european`) and its versioned path (`/v1/price/european`). Old clients keep working. New clients should use `/v1/...` to get structured errors and access the bot-oriented endpoints (`/v1/batch/*`, `/v1/grid/*`, `/v1/price/spread`, `/v1/ready`).
 
 ### Endpoints
 
@@ -241,6 +269,48 @@ Errors return an HTTP 4xx/5xx status with:
 | Verb | Path | Description |
 |------|------|-------------|
 | `POST` | `/vol-surface/fit` | Inverts a list of European quotes into a vol-surface point cloud |
+
+**Batch** — one HTTP round-trip for N requests of the same method. Returns `{ "results": [{ "ok": true, "result": {...} } | { "ok": false, "error": {...} }, ...] }`:
+
+| Verb | Path |
+|------|------|
+| `POST` | `/v1/batch/price/european` |
+| `POST` | `/v1/batch/price/asian` |
+| `POST` | `/v1/batch/price/barrier` |
+| `POST` | `/v1/batch/price/lookback` |
+| `POST` | `/v1/batch/price/american` |
+| `POST` | `/v1/batch/greeks/european` |
+| `POST` | `/v1/batch/greeks/american` |
+
+**Grid** — one set of market parameters + an array of `(strike, type)` contracts. Returns `{ "results": [{ "type", "strike", "price" }, ...] }`. For path-dependent options the Monte Carlo paths are simulated **once** and reused across every contract — pricing 100 strikes at the same `(spot, σ, T, divs, B?)` costs roughly the same as pricing 1.
+
+| Verb | Path | Notes |
+|------|------|-------|
+| `POST` | `/v1/grid/european` | Loops BS per contract (BS is already fast). |
+| `POST` | `/v1/grid/american` | Loops LSM per contract (each call internally parallel). |
+| `POST` | `/v1/grid/asian`    | Shares paths; computes per-path average once, evaluates payoff per contract. |
+| `POST` | `/v1/grid/barrier`  | Shares paths; barrier level / direction / in-out fixed across the grid (vary K). |
+| `POST` | `/v1/grid/lookback` | Shares paths; strike-type fixed across the grid (vary K). |
+
+**Multi-leg spread** — `POST /v1/price/spread`. European legs at one expiry. Body:
+```json
+{
+  "spot": 100, "rate": 0.05, "volatility": 0.20, "timeToExpiry": 1.0,
+  "legs": [
+    { "type": "CALL", "strike": 100, "side": "BUY",  "qty": 1 },
+    { "type": "CALL", "strike": 110, "side": "SELL", "qty": 1 }
+  ]
+}
+```
+Response carries the net premium (BUY = +, SELL = −, multiplied by qty), aggregated Greeks, and the per-leg breakdown.
+
+**Observability**
+
+| Verb | Path | Description |
+|------|------|-------------|
+| `GET`  | `/v1/health`  | Liveness — server is alive. Always open (no auth). |
+| `GET`  | `/v1/ready`   | Readiness — engines have JIT-warmed. 503 with `NOT_READY` until they have. |
+| `GET`  | `/metrics`    | Prometheus text-format scrape endpoint. Always open (no auth). |
 
 ### Request bodies
 
@@ -483,6 +553,38 @@ curl -s -X POST -H "Content-Type: application/json" \
           "timeSteps":252,"discreteMonitoring":true,"arithmeticAverage":true,
           "dividends":{"discrete":[{"time":0.25,"amount":1},{"time":0.75,"amount":1}]}}' \
      http://localhost:8080/price/asian
+
+# Grid pricing — one MC pass, five strikes
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"spot":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "timeSteps":252,"discreteMonitoring":true,"arithmeticAverage":true,
+          "simulations":100000,"seed":42,
+          "contracts":[
+            {"type":"CALL","strike":90},{"type":"CALL","strike":95},
+            {"type":"CALL","strike":100},{"type":"CALL","strike":105},{"type":"CALL","strike":110}]}' \
+     http://localhost:8080/v1/grid/asian
+# → {"results":[{"type":"CALL","strike":90,"price":...}, ...]}
+
+# Batch pricing — 200 strikes in one call
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"requests":[
+          {"type":"CALL","spot":100,"strike":95, "rate":0.05,"volatility":0.20,"timeToExpiry":1.0},
+          {"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0},
+          {"type":"CALL","spot":100,"strike":105,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0}]}' \
+     http://localhost:8080/v1/batch/price/european
+# → {"results":[{"ok":true,"result":{"price":...,"model":"BS"}}, ...]}
+
+# Bull call spread — net premium + aggregated Greeks
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"spot":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "legs":[
+            {"type":"CALL","strike":100,"side":"BUY","qty":1},
+            {"type":"CALL","strike":110,"side":"SELL","qty":1}]}' \
+     http://localhost:8080/v1/price/spread
+# → {"netPrice":4.41,"netGreeks":{...},"legs":[...]}
+
+# Metrics scrape
+curl -s http://localhost:8080/metrics | head
 ```
 
 ## Tech Stack
@@ -520,7 +622,12 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 ## Roadmap
 
-The project is feature-complete as of v3.0.
+v3.1 closes the bot-integration roadmap. Two enhancements remain for a future cut if a real production use case demands them:
+
+- **WebSocket streaming Greeks** — a `/stream/greeks` channel that pushes Δ / Γ / ν updates when spot crosses a configurable bucket. Useful for sub-50 ms delta-hedging loops; the JDK `HttpServer` doesn't speak WS so the implementation would need either a WS library or a hand-rolled RFC 6455 framer.
+- **OpenAPI / Swagger spec at `/openapi.json`** — would let downstream clients generate typed bindings instead of hand-writing DTOs.
+
+Quant-model extensions that are deliberately out of scope for now (each is real work and only worth doing for a specific concrete use case): full discount-curve input replacing the flat-rate `rate` field; volatility-surface-as-input to pricers; FX / borrow carry conventions; vanna / volga / charm / color; Heston / SABR calibration endpoints.
 
 ## Motivation
 

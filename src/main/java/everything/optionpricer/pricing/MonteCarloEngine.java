@@ -228,7 +228,7 @@ public final class MonteCarloEngine {
 
 
     /** Deterministic 64-bit mix of (seed, index) for per-simulation RNG seeding. */
-    static long mixSeed(long seed, int index) {
+    public static long mixSeed(long seed, int index) {
         long h = seed ^ ((long) index * 0x9E3779B97F4A7C15L);
         h ^= (h >>> 32);
         h *= 0xBF58476D1CE4E5B9L;
