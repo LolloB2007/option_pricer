@@ -4,7 +4,7 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v3.2**
+**Current release: v3.3**
 
 Highlights since v1.0:
 
@@ -15,6 +15,10 @@ Highlights since v1.0:
 - **Heston Monte Carlo** for path-dependent options (Asian, Barrier, Lookback) — two-factor full-truncation Euler discretisation; antithetic + parallel.
 - **Volatility surface fitter** — inverts a list of market quotes into a 2D implied-vol surface with strike skew and term structure; linear-in-strike, linear-in-time interpolation.
 - **API bearer-token authentication** — enable with `--token <value>` or the `OPTIONPRICER_API_TOKEN` env var. Constant-time token comparison; 401 with `WWW-Authenticate: Bearer` on failure. `/health` and `OPTIONS` preflight stay open.
+
+### v3.3 — binary wire format on the grid hot path
+
+- **Hand-rolled binary protocol on `/v1/grid/*`** — opt-in via `Content-Type: application/x-pricer-v1`. Same endpoints, same numerical results, ~3× smaller payloads and ~3× faster end-to-end on a 20-strike chain (measured: 782 B JSON request → 246 B binary; 1154 B JSON response → 348 B binary; 320 ms → 112 ms round-trip at warm steady state with seed=42, identical prices to 17 significant figures). Little-endian, schemaless, fixed-shape per endpoint — the win comes from skipping JSON parse/render on a hot loop that exchanges large uniform numeric payloads. JSON remains the default and only the grid endpoints participate; batch / calibrate / fit / single-pricing endpoints all stay JSON where shape variance makes a schemaless binary pointless. See [Binary wire format](#binary-wire-format) below.
 
 ### v3.2 — bot-consumer feedback
 
@@ -374,6 +378,48 @@ Any v1 endpoint accepts an optional top-level `maxLatencyMs: <number>` field. MC
 
 `--token a,b,c` (or `OPTIONPRICER_API_TOKEN=a,b,c`) accepts any of the listed values. Constant-time compare across the whole set so timing doesn't leak how many tokens exist. Rotate by deploying the new value as an additional accepted token, migrating clients, then redeploying with the old value removed.
 
+### Binary wire format
+
+The `/v1/grid/*` endpoints accept an alternative binary encoding that skips JSON parse/render. Opt in by sending `Content-Type: application/x-pricer-v1`; the same MIME is echoed back on the response. Anything else still gets JSON. The grid hot path is where the win actually pays — uniform numeric payloads, hundreds of contracts per call, identical shape across requests. Everything else (batch, calibrate, surface fit, single-pricing) stays JSON: schemaless binary buys nothing when each element's shape varies.
+
+| Encoding | Request (20 strikes) | Response (20 strikes) | Round-trip |
+|----------|---------------------:|----------------------:|-----------:|
+| JSON     | 782 B                | 1154 B                | 320 ms     |
+| Binary   | 246 B                | 348 B                 | 112 ms     |
+
+Numerical results are bit-identical across the two encodings (CRN-seeded MC, seed echoed on both paths).
+
+**Wire format** (all multi-byte values little-endian, no padding):
+
+```
+Request:
+  uint32   magic       = 'OPB1'   (0x31_42_50_4F LE)
+  uint8    method      'E' European | 'A' Asian | 'M' aMerican | 'B' Barrier | 'L' Lookback
+  float64  spot
+  float64  rate
+  float64  volatility
+  float64  timeToExpiry
+  float64  continuousYield        (0 if none)
+  int32    timeSteps              (0 if N/A — European)
+  int32    simulations            (0 = engine default)
+  int64    seed                   (0 = non-reproducible)
+  uint8    flags                  bit0 discreteMonitoring, bit1 arithmeticAverage,
+                                  bit2 upBarrier, bit3 inBarrier, bit4 fixedStrike,
+                                  bit5 useAntithetic
+  // Method-specific block:
+  // Barrier:  float64 barrier
+  // American: int32   exerciseDates
+  int32    contractCount
+  contractCount × { uint8 type ('C' | 'P'), float64 strike }
+
+Response:
+  uint32   magic       = 'OPB1'
+  int32    resultCount
+  resultCount × { uint8 type, float64 strike, float64 price }
+```
+
+Discrete dividends are intentionally absent from the binary path — they're rare in chain-pricing flows. Callers needing them should fall back to JSON. Magic-byte mismatch, bad method discriminator, or implausible `contractCount` return `HTTP 400` with the standard `MALFORMED_JSON` / `INVALID_PARAMETER` error envelope.
+
 ### Request bodies
 
 All bodies accept an optional **`dividends`** field of the shape:
@@ -729,7 +775,7 @@ curl -s http://localhost:8080/openapi.json | jq '.paths | keys[:5]'
 
 ## Roadmap
 
-v3.2 closes the bot-consumer roadmap. One enhancement remains for a future cut if a real production use case demands it:
+v3.3 closes the bot-consumer roadmap. One enhancement remains for a future cut if a real production use case demands it:
 
 - **WebSocket streaming Greeks** — a `/stream/greeks` channel that pushes Δ / Γ / ν updates when spot crosses a configurable bucket. Useful for sub-50 ms delta-hedging loops; the JDK `HttpServer` doesn't speak WS so the implementation would need either a WS library or a hand-rolled RFC 6455 framer.
 

@@ -86,7 +86,9 @@ final class Grid {
     // ============================================================
 
     static final ApiServer.SafeHandler european = ex -> {
-        EuropeanGridRequest req = readJson(ex, EuropeanGridRequest.class);
+        EuropeanGridRequest req = Binary.wantsBinary(ex)
+                ? Binary.readEuropeanGrid(ex)
+                : readJson(ex, EuropeanGridRequest.class);
         validateGrid(req.contracts);
         DividendSchedule divs = ApiServer.toSchedule(req.dividends);
         GridResult[] results = new GridResult[req.contracts.length];
@@ -96,7 +98,7 @@ final class Grid {
             double p = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
             results[i] = new GridResult(c.type, c.strike, p);
         }
-        sendJson(ex, 200, new GridResponse(results));
+        sendGridResponse(ex, results);
     };
 
 
@@ -107,7 +109,9 @@ final class Grid {
     // ============================================================
 
     static final ApiServer.SafeHandler american = ex -> {
-        AmericanGridRequest req = readJson(ex, AmericanGridRequest.class);
+        AmericanGridRequest req = Binary.wantsBinary(ex)
+                ? Binary.readAmericanGrid(ex)
+                : readJson(ex, AmericanGridRequest.class);
         validateGrid(req.contracts);
         DividendSchedule divs = ApiServer.toSchedule(req.dividends);
         int paths = req.simulations != null ? req.simulations : 50_000;
@@ -119,7 +123,7 @@ final class Grid {
             double p = LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, paths, divs).getPrice();
             results[i] = new GridResult(c.type, c.strike, p);
         }
-        sendJson(ex, 200, new GridResponse(results));
+        sendGridResponse(ex, results);
     };
 
 
@@ -135,7 +139,9 @@ final class Grid {
     // ============================================================
 
     static final ApiServer.SafeHandler asian = ex -> {
-        PathGridRequest req = readJson(ex, PathGridRequest.class);
+        PathGridRequest req = Binary.wantsBinary(ex)
+                ? Binary.readAsianGrid(ex)
+                : readJson(ex, PathGridRequest.class);
         validateGrid(req.contracts);
         boolean arith = Boolean.TRUE.equals(req.arithmeticAverage);
         runPathGrid(ex, req, new PathStatGenerator() {
@@ -164,7 +170,9 @@ final class Grid {
     // ============================================================
 
     static final ApiServer.SafeHandler barrier = ex -> {
-        PathGridRequest req = readJson(ex, PathGridRequest.class);
+        PathGridRequest req = Binary.wantsBinary(ex)
+                ? Binary.readBarrierGrid(ex)
+                : readJson(ex, PathGridRequest.class);
         validateGrid(req.contracts);
         if(req.barrier == null || req.upBarrier == null || req.inBarrier == null) {
             throw ApiException.badRequest("barrier endpoint needs `barrier`, `upBarrier`, `inBarrier`");
@@ -226,7 +234,9 @@ final class Grid {
     // ============================================================
 
     static final ApiServer.SafeHandler lookback = ex -> {
-        PathGridRequest req = readJson(ex, PathGridRequest.class);
+        PathGridRequest req = Binary.wantsBinary(ex)
+                ? Binary.readLookbackGrid(ex)
+                : readJson(ex, PathGridRequest.class);
         validateGrid(req.contracts);
         if(req.fixedStrike == null) {
             throw ApiException.badRequest("lookback endpoint needs `fixedStrike`");
@@ -267,6 +277,13 @@ final class Grid {
 
     private static void runPathGrid(HttpExchange ex, PathGridRequest req,
                                     PathStatGenerator gen) throws IOException {
+        GridResult[] out = computePathGrid(req, gen);
+        sendGridResponse(ex, out);
+    }
+
+
+    /** Body-only variant — used by both the JSON and binary entry points. */
+    private static GridResult[] computePathGrid(PathGridRequest req, PathStatGenerator gen) {
         DividendSchedule divs = ApiServer.toSchedule(req.dividends);
         int sims = req.simulations != null ? req.simulations : DEFAULT_SIMULATIONS;
         boolean antithetic = req.useAntithetic == null || req.useAntithetic;
@@ -323,7 +340,20 @@ final class Grid {
             double price = discount * (sum / totalPaths);
             out[ci] = new GridResult(c.type, c.strike, price);
         }
-        sendJson(ex, 200, new GridResponse(out));
+        return out;
+    }
+
+
+    /**
+     * Emit results as either JSON or binary, depending on the request's
+     * Content-Type. Used by every {@code /v1/grid/*} handler.
+     */
+    static void sendGridResponse(HttpExchange ex, GridResult[] results) throws IOException {
+        if(Binary.wantsBinary(ex)) {
+            Binary.writeGridResponse(ex, results);
+        } else {
+            sendJson(ex, 200, new GridResponse(results));
+        }
     }
 
 
