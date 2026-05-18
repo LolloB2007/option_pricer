@@ -20,9 +20,11 @@ import everything.optionpricer.pricing.BlackScholesEngine;
 import everything.optionpricer.pricing.FiniteDifferenceEngine;
 import everything.optionpricer.pricing.Greeks;
 import everything.optionpricer.pricing.GreeksCalculator;
+import everything.optionpricer.pricing.HestonCalibrator;
 import everything.optionpricer.pricing.HestonEngine;
 import everything.optionpricer.pricing.HestonMonteCarloEngine;
 import everything.optionpricer.pricing.ImpliedVolatility;
+import everything.optionpricer.pricing.ProbabilityCalculator;
 import everything.optionpricer.pricing.LongstaffSchwartzEngine;
 import everything.optionpricer.pricing.MonteCarloEngine;
 import everything.optionpricer.pricing.MultiModelPrice;
@@ -69,11 +71,14 @@ public final class ApiServer {
     private static final Gson GSON = new Gson();
 
     /**
-     * Configured bearer token. {@code null} → no auth (every endpoint open).
-     * When non-null, every endpoint except {@code /health} and {@code OPTIONS}
-     * preflight requires {@code Authorization: Bearer <token>}.
+     * Configured bearer tokens. Empty/null → no auth (every endpoint open).
+     * When non-empty, every endpoint except {@code /health} and {@code OPTIONS}
+     * preflight requires {@code Authorization: Bearer <token>} where
+     * {@code <token>} matches any configured value. Holding a set rather
+     * than a single string supports rotation — issue a new token, deploy,
+     * then revoke the old one once clients have migrated.
      */
-    private static volatile String apiToken;
+    private static volatile java.util.Set<String> apiTokens = java.util.Set.of();
 
     private ApiServer() {}
 
@@ -85,7 +90,18 @@ public final class ApiServer {
     public record EuropeanRequest(
             String type, double spot, double strike,
             double rate, double volatility, double timeToExpiry,
-            DividendsDto dividends, String model, HestonParamsDto heston) {}
+            DividendsDto dividends, String model, HestonParamsDto heston,
+            VolSurfaceInput surface) {}
+
+    /**
+     * Optional surface-driven volatility input. When present on a pricing
+     * request the engine fits a {@link VolatilitySurface} from
+     * {@code quotes} and looks up σ at the option's {@code (K, T)} instead
+     * of using the request's flat {@code volatility} field. Collapses the
+     * two-step "IV first, then price" round-trip into one call for the
+     * bot's chain-pricing path.
+     */
+    public record VolSurfaceInput(QuoteDto[] quotes) {}
 
     public record AsianRequest(
             String type, double spot, double strike,
@@ -156,7 +172,14 @@ public final class ApiServer {
     public record DiscreteDividend(double time, double amount) {}
 
     public record PriceResponse(double price)      {}
-    public record ModelPriceResponse(double price, String model, java.util.Map<String, Double> contributions) {}
+    public record ModelPriceResponse(double price, String model,
+                                     java.util.Map<String, Double> contributions,
+                                     Double stdError, Integer paths) {
+        // Convenience for closed-form pricers — no SE / path count.
+        public ModelPriceResponse(double price, String model, java.util.Map<String, Double> contributions) {
+            this(price, model, contributions, null, null);
+        }
+    }
     public record ErrorResponse(String error)      {}
     public record HealthResponse(String status)    {}
     public record PriceAndGreeksResponse(double price, Greeks greeks) {}
@@ -187,6 +210,36 @@ public final class ApiServer {
 
     public record SpreadResponse(double netPrice, Greeks netGreeks, SpreadLegResult[] legs) {}
 
+    // ----- Forward / Black-76 ----- //
+    public record ForwardRequest(String type, double forward, double strike,
+                                 double rate, double volatility, double timeToExpiry) {}
+
+    // ----- Probability ----- //
+    public record ProbItmRequest(String type, double spot, double strike,
+                                 double rate, double volatility, double timeToExpiry,
+                                 DividendsDto dividends) {}
+    public record ProbItmResponse(double probability) {}
+
+    public record ProbTouchRequest(double spot, double barrier,
+                                   double rate, double volatility, double timeToExpiry,
+                                   DividendsDto dividends) {}
+    public record ProbTouchResponse(double probability) {}
+
+    // ----- Vol-surface eval ----- //
+    public record VolSurfaceEvalRequest(
+            double spot, double rate, DividendsDto dividends,
+            QuoteDto[] quotes, double strike, double timeToExpiry) {}
+    public record VolSurfaceEvalResponse(double impliedVolatility) {}
+
+    // ----- Heston calibrate ----- //
+    public record HestonCalibrateRequest(
+            double spot, double rate, DividendsDto dividends,
+            QuoteDto[] quotes,
+            HestonParamsDto initialGuess,
+            Integer maxIterations, Double tolerance) {}
+    public record HestonCalibrateResponse(HestonParamsDto params, double rmse,
+                                          int iterations, boolean converged) {}
+
 
     // ===================================================================
     //  Bootstrap
@@ -208,7 +261,17 @@ public final class ApiServer {
      * {@code Authorization: Bearer <authToken>}.
      */
     public static HttpServer start(int port, String authToken) throws IOException {
-        apiToken = (authToken == null || authToken.isBlank()) ? null : authToken;
+        // Accept a single value or a comma-separated list. Empty/null = no auth.
+        if(authToken == null || authToken.isBlank()) {
+            apiTokens = java.util.Set.of();
+        } else {
+            java.util.Set<String> tokens = new java.util.HashSet<>();
+            for(String t : authToken.split(",")) {
+                String trimmed = t.trim();
+                if(!trimmed.isEmpty()) tokens.add(trimmed);
+            }
+            apiTokens = java.util.Set.copyOf(tokens);
+        }
         return startInternal(port);
     }
 
@@ -278,7 +341,25 @@ public final class ApiServer {
         register(server, "/v1/grid/barrier",  Grid.barrier,  true, true);
         register(server, "/v1/grid/lookback", Grid.lookback, true, true);
 
-        register(server, "/v1/price/spread",  ApiServer::priceSpread, true, true);
+        register(server, "/v1/price/spread",       ApiServer::priceSpread,       true, true);
+        register(server, "/v1/price/european-forward",
+                                                   ApiServer::priceEuropeanForward, true, true);
+        register(server, "/v1/greeks/european-forward",
+                                                   ApiServer::greeksEuropeanForward, true, true);
+        register(server, "/v1/prob/itm",            ApiServer::probItm,           true, true);
+        register(server, "/v1/prob/touch",          ApiServer::probTouch,         true, true);
+        register(server, "/v1/vol-surface/eval",    ApiServer::volSurfaceEval,    true, true);
+        register(server, "/v1/heston/calibrate",    ApiServer::hestonCalibrate,   true, true);
+        server.createContext("/openapi.json", ex -> {
+            addCorsHeaders(ex);
+            if(!"GET".equalsIgnoreCase(ex.getRequestMethod())) {
+                ex.sendResponseHeaders(405, -1); ex.close(); return;
+            }
+            byte[] body = OpenApi.spec().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
+            ex.sendResponseHeaders(200, body.length);
+            try (OutputStream os = ex.getResponseBody()) { os.write(body); }
+        });
 
         // ----- Observability (no auth, no /v1 — operational endpoints) ----- //
         server.createContext("/metrics", ex -> {
@@ -388,7 +469,7 @@ public final class ApiServer {
                 // Auth gate. /health, /v1/health, /v1/ready, /metrics are
                 // intentionally exempt so liveness/readiness probes and
                 // metrics scrapers don't need credentials.
-                if(apiToken != null && !isAuthExempt(path)) {
+                if(!apiTokens.isEmpty() && !isAuthExempt(path)) {
                     if(!hasValidBearerToken(ex)) {
                         ex.getResponseHeaders().add("WWW-Authenticate", "Bearer");
                         statusForMetrics = 401;
@@ -410,6 +491,10 @@ public final class ApiServer {
             } catch(ApiException ae) {
                 statusForMetrics = ae.status;
                 emitError(ex, structuredErrors, ae.status, ae.code, ae.field, ae.getMessage());
+            } catch(everything.optionpricer.pricing.Deadline.DeadlineExceededException dee) {
+                statusForMetrics = 504;
+                emitError(ex, structuredErrors, 504, "DEADLINE_EXCEEDED", "maxLatencyMs",
+                        "request exceeded configured maxLatencyMs");
             } catch(IllegalArgumentException iae) {
                 statusForMetrics = 400;
                 emitError(ex, structuredErrors, 400, "INVALID_PARAMETER", null,
@@ -419,6 +504,7 @@ public final class ApiServer {
                 emitError(ex, structuredErrors, 500, "INTERNAL_ERROR", null,
                         e.getClass().getSimpleName() + ": " + e.getMessage());
             } finally {
+                everything.optionpricer.pricing.Deadline.clear();
                 long latencyNs = System.nanoTime() - startNs;
                 Metrics.onRequestFinished(Metrics.labelFor(path), statusForMetrics, latencyNs);
                 RequestLogger.log(reqId, httpMethod, path, statusForMetrics, latencyNs);
@@ -474,10 +560,20 @@ public final class ApiServer {
             return false;
         }
         String presented = header.substring(prefix.length()).trim();
-
         byte[] a = presented.getBytes(StandardCharsets.UTF_8);
-        byte[] b = apiToken.getBytes(StandardCharsets.UTF_8);
-        return MessageDigest.isEqual(a, b);
+
+        // Constant-time compare against every configured token. We always
+        // walk the full set so timing doesn't leak how many tokens exist
+        // or which slot a token sits in.
+        boolean match = false;
+        for(String t : apiTokens) {
+            byte[] b = t.getBytes(StandardCharsets.UTF_8);
+            // MessageDigest.isEqual short-circuits on length mismatch only
+            // for the array-bounds check itself; per-byte work is constant
+            // time when lengths agree. Force the OR so the JIT can't elide.
+            match |= MessageDigest.isEqual(a, b);
+        }
+        return match;
     }
 
 
@@ -490,7 +586,20 @@ public final class ApiServer {
 
     private static <T> T readJson(HttpExchange ex, Class<T> type) throws IOException {
         try (Reader r = new InputStreamReader(ex.getRequestBody(), StandardCharsets.UTF_8)) {
-            T parsed = GSON.fromJson(r, type);
+            // Parse to JsonElement first so we can peek for the optional
+            // top-level `maxLatencyMs` field without forcing every DTO to
+            // declare it.
+            com.google.gson.JsonElement root = com.google.gson.JsonParser.parseReader(r);
+            if(root == null || root.isJsonNull())
+                throw new IllegalArgumentException("empty request body");
+            if(root.isJsonObject()) {
+                com.google.gson.JsonElement ml = root.getAsJsonObject().get("maxLatencyMs");
+                if(ml != null && !ml.isJsonNull() && ml.isJsonPrimitive() && ml.getAsJsonPrimitive().isNumber()) {
+                    long ms = ml.getAsLong();
+                    if(ms > 0) everything.optionpricer.pricing.Deadline.setFromNow(ms);
+                }
+            }
+            T parsed = GSON.fromJson(root, type);
             if(parsed == null) throw new IllegalArgumentException("empty request body");
             return parsed;
         } catch(JsonSyntaxException e) {
@@ -579,18 +688,23 @@ public final class ApiServer {
         EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
         DividendSchedule divs = toSchedule(req.dividends);
         PricingModel model = parseModel(req.model, PricingModel.BS);
+        // Surface-driven σ override (#3). If `surface` is supplied, fit it
+        // and look up σ at this strike/expiry instead of using the flat
+        // `volatility` field.
+        double sigma = resolveSigma(req.surface, req.spot, req.rate, divs, req.strike, req.timeToExpiry,
+                                    req.volatility);
 
         switch(model) {
             case BS -> {
-                double p = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                double p = BlackScholesEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice();
                 return new ModelPriceResponse(p, "BS", null);
             }
             case BINOMIAL -> {
-                double p = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                double p = BinomialEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice();
                 return new ModelPriceResponse(p, "BINOMIAL", null);
             }
             case PDE -> {
-                double p = FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                double p = FiniteDifferenceEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice();
                 return new ModelPriceResponse(p, "PDE", null);
             }
             case HESTON -> {
@@ -600,9 +714,9 @@ public final class ApiServer {
             }
             case AUTO -> {
                 MultiModelPrice.Builder b = MultiModelPrice.builder()
-                        .add(PricingModel.BS,       BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
-                        .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
-                        .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice());
+                        .add(PricingModel.BS,       BlackScholesEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice())
+                        .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice())
+                        .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice());
                 if(req.heston != null) {
                     b.add(PricingModel.HESTON, HestonEngine.price(opt, req.spot, req.rate, toHestonParams(req.heston), divs).getPrice());
                 }
@@ -611,6 +725,29 @@ public final class ApiServer {
             }
             default -> throw ApiException.unsupportedModel("model " + model + " is not applicable to European pricing");
         }
+    }
+
+
+    /**
+     * If {@code surface} is supplied, fit it and look up σ at the option's
+     * {@code (K, T)}. Otherwise fall back to {@code fallback}.
+     */
+    private static double resolveSigma(VolSurfaceInput surface,
+                                       double spot, double rate, DividendSchedule divs,
+                                       double strike, double T, double fallback) {
+        if(surface == null || surface.quotes() == null || surface.quotes().length == 0) {
+            return fallback;
+        }
+        java.util.List<VolatilitySurface.Quote> quotes = new java.util.ArrayList<>(surface.quotes().length);
+        for(QuoteDto q : surface.quotes()) {
+            quotes.add(new VolatilitySurface.Quote(q.strike, q.timeToExpiry,
+                                                    parseType(q.type), q.marketPrice));
+        }
+        VolatilitySurface surf = VolatilitySurface.fit(quotes, spot, rate, divs);
+        if(surf.isEmpty())
+            throw ApiException.badField("surface.quotes",
+                    "could not invert any supplied quote to build the surface");
+        return surf.volAt(strike, T);
     }
 
 
@@ -672,27 +809,29 @@ public final class ApiServer {
         int sims = simulations != null ? simulations : 100_000;
         switch(model) {
             case MC -> {
-                double p;
+                PricingResult res;
                 if(seed != null) {
-                    p = MonteCarloEngine.priceSeeded(opt, spot, rate, sigma, sims, seed, divs).getPrice();
+                    res = MonteCarloEngine.priceSeeded(opt, spot, rate, sigma, sims, seed, divs);
                 } else {
-                    p = (simulations != null)
-                            ? MonteCarloEngine.price(opt, spot, rate, sigma, simulations, divs).getPrice()
-                            : MonteCarloEngine.price(opt, spot, rate, sigma, divs).getPrice();
+                    res = (simulations != null)
+                            ? MonteCarloEngine.price(opt, spot, rate, sigma, simulations, divs)
+                            : MonteCarloEngine.price(opt, spot, rate, sigma, divs);
                 }
-                return new ModelPriceResponse(p, "MC", null);
+                return new ModelPriceResponse(res.getPrice(), "MC", null,
+                                              res.getStdError(), res.getPaths());
             }
             case HESTON -> {
                 HestonParams h = toHestonParams(hestonDto);
-                double p;
+                PricingResult res;
                 if(seed != null) {
-                    p = HestonMonteCarloEngine.priceSeeded(opt, spot, rate, h, sims, seed, divs).getPrice();
+                    res = HestonMonteCarloEngine.priceSeeded(opt, spot, rate, h, sims, seed, divs);
                 } else {
-                    p = (simulations != null)
-                            ? HestonMonteCarloEngine.price(opt, spot, rate, h, simulations, divs).getPrice()
-                            : HestonMonteCarloEngine.price(opt, spot, rate, h, divs).getPrice();
+                    res = (simulations != null)
+                            ? HestonMonteCarloEngine.price(opt, spot, rate, h, simulations, divs)
+                            : HestonMonteCarloEngine.price(opt, spot, rate, h, divs);
                 }
-                return new ModelPriceResponse(p, "HESTON", null);
+                return new ModelPriceResponse(res.getPrice(), "HESTON", null,
+                                              res.getStdError(), res.getPaths());
             }
             default -> throw ApiException.unsupportedModel("model " + model + " is not applicable to path-dependent options");
         }
@@ -711,10 +850,11 @@ public final class ApiServer {
 
         switch(model) {
             case LSM -> {
-                double p = (req.simulations != null)
-                        ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
-                        : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-                return new ModelPriceResponse(p, "LSM", null);
+                PricingResult res = (req.simulations != null)
+                        ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
+                        : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs);
+                return new ModelPriceResponse(res.getPrice(), "LSM", null,
+                                              res.getStdError(), res.getPaths());
             }
             case BINOMIAL -> {
                 double p = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
@@ -725,15 +865,17 @@ public final class ApiServer {
                 return new ModelPriceResponse(p, "PDE", null);
             }
             case AUTO -> {
-                double lsm = (req.simulations != null)
-                        ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs).getPrice()
-                        : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+                PricingResult lsmRes = (req.simulations != null)
+                        ? LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, req.simulations, divs)
+                        : LongstaffSchwartzEngine.price(opt, req.spot, req.rate, req.volatility, divs);
                 MultiModelPrice.Aggregated agg = MultiModelPrice.builder()
-                        .add(PricingModel.LSM,      lsm)
+                        .add(PricingModel.LSM,      lsmRes.getPrice())
                         .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
                         .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
                         .build();
-                return new ModelPriceResponse(agg.price(), "AUTO", stringKeyed(agg.contributions()));
+                // SE belongs to the LSM contributor, surface that as the response's SE.
+                return new ModelPriceResponse(agg.price(), "AUTO", stringKeyed(agg.contributions()),
+                                              lsmRes.getStdError(), lsmRes.getPaths());
             }
             default -> throw ApiException.unsupportedModel("model " + model + " is not applicable to American pricing");
         }
@@ -753,22 +895,24 @@ public final class ApiServer {
         DividendSchedule divs = toSchedule(req.dividends);
         PricingModel model = parseModel(req.model, PricingModel.BS);
         HestonParams heston = (model == PricingModel.HESTON || req.heston != null) ? toHestonParams(req.heston) : null;
+        double sigma = resolveSigma(req.surface, req.spot, req.rate, divs, req.strike, req.timeToExpiry,
+                                    req.volatility);
 
         double price;
         switch(model) {
-            case BS       -> price = BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-            case BINOMIAL -> price = BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
-            case PDE      -> price = FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice();
+            case BS       -> price = BlackScholesEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice();
+            case BINOMIAL -> price = BinomialEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice();
+            case PDE      -> price = FiniteDifferenceEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice();
             case HESTON   -> price = HestonEngine.price(opt, req.spot, req.rate, heston, divs).getPrice();
             case AUTO     -> price = MultiModelPrice.builder()
-                    .add(PricingModel.BS,       BlackScholesEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
-                    .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
-                    .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, req.volatility, divs).getPrice())
+                    .add(PricingModel.BS,       BlackScholesEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice())
+                    .add(PricingModel.BINOMIAL, BinomialEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice())
+                    .add(PricingModel.PDE,      FiniteDifferenceEngine.price(opt, req.spot, req.rate, sigma, divs).getPrice())
                     .build().price();
             default       -> throw ApiException.unsupportedModel("model " + model + " not applicable to European");
         }
 
-        Greeks g = GreeksCalculator.compute(opt, req.spot, req.rate, req.volatility, divs, model, heston);
+        Greeks g = GreeksCalculator.compute(opt, req.spot, req.rate, sigma, divs, model, heston);
         return new PriceAndGreeksResponse(price, g);
     }
 
@@ -1006,6 +1150,94 @@ public final class ApiServer {
         }
         Greeks netGreeks = new Greeks(netDelta, netGamma, netVega, netTheta, netRho);
         sendJson(ex, 200, new SpreadResponse(netPrice, netGreeks, legResults));
+    }
+
+
+    // ===================================================================
+    //  Forward / Black-76
+    // ===================================================================
+
+    private static void priceEuropeanForward(HttpExchange ex) throws IOException {
+        ForwardRequest req = readJson(ex, ForwardRequest.class);
+        EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
+        double p = BlackScholesEngine.priceFromForward(opt, req.forward, req.rate, req.volatility).getPrice();
+        sendJson(ex, 200, new ModelPriceResponse(p, "BLACK76", null));
+    }
+
+    private static void greeksEuropeanForward(HttpExchange ex) throws IOException {
+        ForwardRequest req = readJson(ex, ForwardRequest.class);
+        EuropeanOption opt = EuropeanOption.of(parseType(req.type), req.strike, req.timeToExpiry);
+        double p = BlackScholesEngine.priceFromForward(opt, req.forward, req.rate, req.volatility).getPrice();
+        Greeks g = BlackScholesEngine.greeksFromForward(opt, req.forward, req.rate, req.volatility);
+        sendJson(ex, 200, new PriceAndGreeksResponse(p, g));
+    }
+
+
+    // ===================================================================
+    //  Probability — ITM and touch
+    // ===================================================================
+
+    private static void probItm(HttpExchange ex) throws IOException {
+        ProbItmRequest req = readJson(ex, ProbItmRequest.class);
+        boolean isCall = parseType(req.type) == OptionType.CALL;
+        double p = ProbabilityCalculator.probItm(req.spot, req.strike, req.rate, req.volatility,
+                                                  req.timeToExpiry, toSchedule(req.dividends), isCall);
+        sendJson(ex, 200, new ProbItmResponse(p));
+    }
+
+    private static void probTouch(HttpExchange ex) throws IOException {
+        ProbTouchRequest req = readJson(ex, ProbTouchRequest.class);
+        double p = ProbabilityCalculator.probTouch(req.spot, req.barrier, req.rate, req.volatility,
+                                                    req.timeToExpiry, toSchedule(req.dividends));
+        sendJson(ex, 200, new ProbTouchResponse(p));
+    }
+
+
+    // ===================================================================
+    //  Vol-surface eval — fit + interpolate at (K, T) in one call
+    // ===================================================================
+
+    private static void volSurfaceEval(HttpExchange ex) throws IOException {
+        VolSurfaceEvalRequest req = readJson(ex, VolSurfaceEvalRequest.class);
+        if(req.quotes == null || req.quotes.length == 0)
+            throw ApiException.badField("quotes", "must be non-empty");
+        java.util.List<VolatilitySurface.Quote> quotes = new java.util.ArrayList<>(req.quotes.length);
+        for(QuoteDto q : req.quotes) {
+            quotes.add(new VolatilitySurface.Quote(q.strike, q.timeToExpiry,
+                                                    parseType(q.type), q.marketPrice));
+        }
+        VolatilitySurface surf = VolatilitySurface.fit(quotes, req.spot, req.rate, toSchedule(req.dividends));
+        if(surf.isEmpty())
+            throw ApiException.badRequest("could not invert any of the supplied quotes");
+        double iv = surf.volAt(req.strike, req.timeToExpiry);
+        sendJson(ex, 200, new VolSurfaceEvalResponse(iv));
+    }
+
+
+    // ===================================================================
+    //  Heston calibration — Nelder-Mead on (v0, κ, θ, ξ, ρ)
+    // ===================================================================
+
+    private static void hestonCalibrate(HttpExchange ex) throws IOException {
+        HestonCalibrateRequest req = readJson(ex, HestonCalibrateRequest.class);
+        if(req.quotes == null || req.quotes.length == 0)
+            throw ApiException.badField("quotes", "must be non-empty");
+
+        java.util.List<HestonCalibrator.Quote> quotes = new java.util.ArrayList<>(req.quotes.length);
+        for(QuoteDto q : req.quotes) {
+            quotes.add(new HestonCalibrator.Quote(q.strike, q.timeToExpiry,
+                                                   parseType(q.type), q.marketPrice));
+        }
+        HestonParams initial = req.initialGuess != null ? toHestonParams(req.initialGuess) : null;
+        int maxIter = req.maxIterations != null ? req.maxIterations : 400;
+        double tol  = req.tolerance     != null ? req.tolerance     : 1.0e-6;
+
+        HestonCalibrator.Result r = HestonCalibrator.calibrate(
+                quotes, req.spot, req.rate, toSchedule(req.dividends), initial, maxIter, tol);
+        HestonParams h = r.params();
+        sendJson(ex, 200, new HestonCalibrateResponse(
+                new HestonParamsDto(h.v0(), h.kappa(), h.theta(), h.xi(), h.rho()),
+                r.rmse(), r.iterations(), r.converged()));
     }
 
 

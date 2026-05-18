@@ -4,7 +4,7 @@ A Java application for pricing options — **European, Asian, Barrier, Lookback,
 
 ## Release
 
-**Current release: v3.1**
+**Current release: v3.2**
 
 Highlights since v1.0:
 
@@ -15,6 +15,18 @@ Highlights since v1.0:
 - **Heston Monte Carlo** for path-dependent options (Asian, Barrier, Lookback) — two-factor full-truncation Euler discretisation; antithetic + parallel.
 - **Volatility surface fitter** — inverts a list of market quotes into a 2D implied-vol surface with strike skew and term structure; linear-in-strike, linear-in-time interpolation.
 - **API bearer-token authentication** — enable with `--token <value>` or the `OPTIONPRICER_API_TOKEN` env var. Constant-time token comparison; 401 with `WWW-Authenticate: Bearer` on failure. `/health` and `OPTIONS` preflight stay open.
+
+### v3.2 — bot-consumer feedback
+
+- **MC standard error** — every Monte Carlo / LSM response now carries `stdError` (in price units) and `paths`. Closed-form pricers return `null` for both. The bot can size positions against the actual estimator uncertainty instead of treating a single MC price as if it were exact.
+- **Heston calibration** — `POST /v1/heston/calibrate`. Nelder-Mead simplex on `(v0, κ, θ, ξ, ρ)` against a list of European market quotes. Returns the fitted params + RMSE + iteration count. Makes `model=HESTON` actually usable in production.
+- **Vol-surface as pricer input** — `/v1/price/european` and `/v1/greeks/european` accept an optional `surface: { quotes: [...] }` field. When supplied, the engine fits the surface from the quotes and looks up σ at the option's `(K, T)` instead of using the flat `volatility` field. Collapses the bot's two-round-trip "IV first, then price" pattern into one call.
+- **Vol-surface eval endpoint** — `POST /v1/vol-surface/eval { spot, rate, quotes, strike, timeToExpiry }` returns the interpolated implied vol at one `(K, T)`. Saves the client from re-implementing the linear-in-K / linear-in-T interpolation.
+- **Forward / Black-76 pricing** — `POST /v1/price/european-forward` and `/v1/greeks/european-forward` accept a `forward` field directly. For futures options / CFDs / instruments without a clean `(spot, r, q)` decomposition.
+- **Probability endpoints** — `POST /v1/prob/itm` (risk-neutral probability of finishing in the money) and `POST /v1/prob/touch` (probability the underlying touches a barrier before expiry). Closed-form under GBM. Useful for strategy filters ("only sell condors where short-strike touch-prob < 30%").
+- **`maxLatencyMs` cooperative deadline** — any request can include `maxLatencyMs: <number>` in its body. MC / LSM engines check the deadline at simulation-batch boundaries on every parallel worker; if exceeded, the response is `HTTP 504` with code `DEADLINE_EXCEEDED`. Lets the bot cap tail latency on heavy calibration / batch-grid calls.
+- **Multiple bearer tokens** — `--token a,b,c` (or comma-separated `OPTIONPRICER_API_TOKEN`) accepts any of the listed values. Supports rotation: issue a new token, deploy, then revoke the old one once clients have migrated. Constant-time compare against every token to avoid timing-based discovery of token count or position.
+- **OpenAPI spec** — `GET /openapi.json` returns an OpenAPI 3.0 spec describing every v1 endpoint. Lets downstream clients generate typed bindings instead of hand-writing DTOs.
 
 ### v3.1 — bot-oriented API surface
 
@@ -308,9 +320,59 @@ Response carries the net premium (BUY = +, SELL = −, multiplied by qty), aggre
 
 | Verb | Path | Description |
 |------|------|-------------|
-| `GET`  | `/v1/health`  | Liveness — server is alive. Always open (no auth). |
-| `GET`  | `/v1/ready`   | Readiness — engines have JIT-warmed. 503 with `NOT_READY` until they have. |
-| `GET`  | `/metrics`    | Prometheus text-format scrape endpoint. Always open (no auth). |
+| `GET`  | `/v1/health`     | Liveness — server is alive. Always open (no auth). |
+| `GET`  | `/v1/ready`      | Readiness — engines have JIT-warmed. 503 with `NOT_READY` until they have. |
+| `GET`  | `/metrics`       | Prometheus text-format scrape endpoint. Always open (no auth). |
+| `GET`  | `/openapi.json`  | OpenAPI 3.0 spec for the v1 surface. Always open (no auth). |
+
+**v3.2 endpoints**
+
+| Verb | Path | Description |
+|------|------|-------------|
+| `POST` | `/v1/heston/calibrate`       | Nelder-Mead calibration of `(v0, κ, θ, ξ, ρ)` against market quotes. Returns fitted params + RMSE + iterations. |
+| `POST` | `/v1/vol-surface/eval`       | Fit a surface from quotes and return the interpolated σ at one `(K, T)`. |
+| `POST` | `/v1/price/european-forward` | Black-76 — price European on a forward / futures. |
+| `POST` | `/v1/greeks/european-forward`| Black-76 Greeks. |
+| `POST` | `/v1/prob/itm`               | Risk-neutral P(S_T finishes ITM). |
+| `POST` | `/v1/prob/touch`             | P(underlying touches barrier B before expiry). |
+
+**MC standard error on Monte Carlo responses**
+
+Any MC / LSM / Heston-MC response now includes `stdError` (in price units) and `paths`:
+
+```json
+{ "price": 5.7516, "model": "MC", "stdError": 0.0247, "paths": 50000 }
+```
+
+Closed-form pricers (BS, Binomial, PDE, Heston-Fourier) return `null` for both.
+
+**Vol-surface as pricer input**
+
+`/v1/price/european` and `/v1/greeks/european` accept an optional `surface` field. When present the engine fits a surface from the supplied quotes and uses σ from `volAt(K, T)` instead of the request's flat `volatility`:
+
+```json
+{
+  "type": "CALL", "spot": 100, "strike": 100,
+  "rate": 0.05, "volatility": 0.0, "timeToExpiry": 1.0,
+  "surface": {
+    "quotes": [
+      { "strike":  90, "timeToExpiry": 1.0, "type": "CALL", "marketPrice": 15.7 },
+      { "strike": 100, "timeToExpiry": 1.0, "type": "CALL", "marketPrice": 10.45 },
+      { "strike": 110, "timeToExpiry": 1.0, "type": "CALL", "marketPrice": 6.5 }
+    ]
+  }
+}
+```
+
+The `volatility` field is required by the schema but ignored when `surface` is present.
+
+**maxLatencyMs**
+
+Any v1 endpoint accepts an optional top-level `maxLatencyMs: <number>` field. MC / LSM engines check the deadline at simulation-batch boundaries on every parallel worker; if exceeded the response is HTTP 504 with code `DEADLINE_EXCEEDED`. Closed-form pricers finish well under any sensible deadline and aren't affected.
+
+**Multiple bearer tokens**
+
+`--token a,b,c` (or `OPTIONPRICER_API_TOKEN=a,b,c`) accepts any of the listed values. Constant-time compare across the whole set so timing doesn't leak how many tokens exist. Rotate by deploying the new value as an additional accepted token, migrating clients, then redeploying with the old value removed.
 
 ### Request bodies
 
@@ -585,6 +647,51 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 # Metrics scrape
 curl -s http://localhost:8080/metrics | head
+
+# Heston calibration against market quotes
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"spot":100,"rate":0.05,"quotes":[
+          {"strike":90, "timeToExpiry":0.5,"type":"CALL","marketPrice":13.0},
+          {"strike":100,"timeToExpiry":0.5,"type":"CALL","marketPrice":6.5},
+          {"strike":110,"timeToExpiry":0.5,"type":"CALL","marketPrice":2.5},
+          {"strike":90, "timeToExpiry":1.0,"type":"CALL","marketPrice":15.7},
+          {"strike":100,"timeToExpiry":1.0,"type":"CALL","marketPrice":10.45},
+          {"strike":110,"timeToExpiry":1.0,"type":"CALL","marketPrice":6.5}]}' \
+     http://localhost:8080/v1/heston/calibrate
+# → {"params":{"v0":0.04,"kappa":1.5,"theta":0.04,"xi":0.30,"rho":-0.7},"rmse":0.02,"iterations":120,"converged":true}
+
+# Black-76 — option on a future
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","forward":105,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0}' \
+     http://localhost:8080/v1/price/european-forward
+# → {"price":10.37,"model":"BLACK76"}
+
+# Probability of touch — short-strike risk filter
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"spot":100,"barrier":120,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0}' \
+     http://localhost:8080/v1/prob/touch
+# → {"probability":0.413}
+
+# Surface as pricer input — no separate IV round-trip
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0,"timeToExpiry":1.0,
+          "surface":{"quotes":[
+            {"strike":90, "timeToExpiry":1.0,"type":"CALL","marketPrice":15.7},
+            {"strike":100,"timeToExpiry":1.0,"type":"CALL","marketPrice":10.45},
+            {"strike":110,"timeToExpiry":1.0,"type":"CALL","marketPrice":6.5}]}}' \
+     http://localhost:8080/v1/price/european
+# → σ from surface ≈ 0.20, price = 10.45
+
+# maxLatencyMs cap on a heavy MC request
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{"type":"CALL","spot":100,"strike":100,"rate":0.05,"volatility":0.20,"timeToExpiry":1.0,
+          "timeSteps":252,"discreteMonitoring":true,"arithmeticAverage":true,
+          "simulations":10000000,"maxLatencyMs":50}' \
+     http://localhost:8080/v1/price/asian
+# → 504 {"error":{"code":"DEADLINE_EXCEEDED",...}}
+
+# OpenAPI spec
+curl -s http://localhost:8080/openapi.json | jq '.paths | keys[:5]'
 ```
 
 ## Tech Stack
@@ -622,12 +729,11 @@ curl -s http://localhost:8080/metrics | head
 
 ## Roadmap
 
-v3.1 closes the bot-integration roadmap. Two enhancements remain for a future cut if a real production use case demands them:
+v3.2 closes the bot-consumer roadmap. One enhancement remains for a future cut if a real production use case demands it:
 
 - **WebSocket streaming Greeks** — a `/stream/greeks` channel that pushes Δ / Γ / ν updates when spot crosses a configurable bucket. Useful for sub-50 ms delta-hedging loops; the JDK `HttpServer` doesn't speak WS so the implementation would need either a WS library or a hand-rolled RFC 6455 framer.
-- **OpenAPI / Swagger spec at `/openapi.json`** — would let downstream clients generate typed bindings instead of hand-writing DTOs.
 
-Quant-model extensions that are deliberately out of scope for now (each is real work and only worth doing for a specific concrete use case): full discount-curve input replacing the flat-rate `rate` field; volatility-surface-as-input to pricers; FX / borrow carry conventions; vanna / volga / charm / color; Heston / SABR calibration endpoints.
+Quant-model extensions that are deliberately out of scope (each is real work and only worth doing for a specific concrete use case): full discount-curve input replacing the flat-rate `rate` field; FX / borrow carry conventions separate from dividend yield; vanna / volga / charm / color second-order Greeks; SABR calibration (Heston is already in).
 
 ## Motivation
 
