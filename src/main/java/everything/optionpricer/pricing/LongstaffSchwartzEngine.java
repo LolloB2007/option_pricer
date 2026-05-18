@@ -103,14 +103,19 @@ public final class LongstaffSchwartzEngine {
 
         final int parallelism = Math.max(1, Runtime.getRuntime().availableProcessors());
         final int batchSize   = (pairs + parallelism - 1) / parallelism;
+        final long deadlineNs = Deadline.peekNs();
 
         IntStream.range(0, parallelism).parallel().forEach(t -> {
             int start = t * batchSize;
             int end   = Math.min(pairs, start + batchSize);
             if(start >= end) return;
+            Deadline.checkpointAt(deadlineNs);
             if(seed == null) simulatePaths(S, start, end, spot, drift, diff, N, stepDivs);
             else             simulatePathsSeeded(S, start, end, spot, drift, diff, N, stepDivs, seed);
         });
+        // Backward pass: cheap O(P) per date, single-threaded — check
+        // deadline once before entering it.
+        Deadline.checkpointAt(deadlineNs);
 
         // Backward induction: choose exercise time per path.
         // cashflow[i] = payoff at exerciseTime[i].
@@ -169,14 +174,21 @@ public final class LongstaffSchwartzEngine {
         }
 
         // Discount each path's chosen cashflow back to t=0 and average —
-        // table lookup, no per-path inner loop.
-        double sum = 0.0;
+        // table lookup, no per-path inner loop. Track sumSq for the
+        // standard-error estimate.
+        double sum   = 0.0;
+        double sumSq = 0.0;
         for(int i = 0; i < totalPaths; i++) {
-            sum += cashflow[i] * discountPow[exerciseTime[i]];
+            double pv = cashflow[i] * discountPow[exerciseTime[i]];
+            sum   += pv;
+            sumSq += pv * pv;
         }
-        double price = sum / totalPaths;
+        double price    = sum / totalPaths;
+        double variance = (sumSq / totalPaths) - price * price;
+        if(variance < 0) variance = 0;
+        double stdError = Math.sqrt(variance / totalPaths);
 
-        return new PricingResult(price);
+        return new PricingResult(price, stdError, totalPaths);
     }
 
 

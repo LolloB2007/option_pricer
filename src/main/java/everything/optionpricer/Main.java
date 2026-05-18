@@ -38,7 +38,8 @@ public class Main {
                 ApiServer.start(port, token);
                 System.out.println("OptionPricer API listening on http://localhost:" + port);
                 if(token != null && !token.isBlank()) {
-                    System.out.println("Authentication: ENABLED — bearer token required on every endpoint except /health.");
+                    int n = (int) java.util.Arrays.stream(token.split(",")).map(String::trim).filter(s -> !s.isEmpty()).count();
+                    System.out.println("Authentication: ENABLED — " + n + " bearer token" + (n == 1 ? "" : "s") + " accepted; required on every endpoint except /health.");
                 } else {
                     System.out.println("Authentication: DISABLED — bind to localhost only or front with a reverse proxy.");
                 }

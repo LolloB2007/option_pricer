@@ -118,35 +118,44 @@ public final class HestonMonteCarloEngine {
         final boolean seeded = (seed != null);
         final long seedVal = seeded ? seed : 0L;
 
-        double sum = IntStream.range(0, parallelism).parallel().mapToDouble(t -> {
-            int start = t * batchSize;
-            int end   = Math.min(pairs, start + batchSize);
-            if(start >= end) return 0.0;
-            return runBatch(option, ctx,
-                            spot, logSpot, drift, sqrtDt, tS,
-                            v0, kappa, theta, xi, rho, sqrt1mRho2,
-                            stepDivs, hasDiscreteDivs,
-                            start, end - start, seeded, seedVal);
-        }).sum();
+        double[] totals = IntStream.range(0, parallelism).parallel()
+                .mapToObj(t -> {
+                    int start = t * batchSize;
+                    int end   = Math.min(pairs, start + batchSize);
+                    if(start >= end) return new double[]{0.0, 0.0};
+                    return runBatch(option, ctx,
+                                    spot, logSpot, drift, sqrtDt, tS,
+                                    v0, kappa, theta, xi, rho, sqrt1mRho2,
+                                    stepDivs, hasDiscreteDivs,
+                                    start, end - start, seeded, seedVal);
+                })
+                .reduce(new double[]{0.0, 0.0},
+                        (a, b) -> new double[]{a[0] + b[0], a[1] + b[1]});
 
-        double averagePayoff = sum / (2.0 * pairs);
-        return new PricingResult(Math.exp(-r * T) * averagePayoff);
+        double discount  = Math.exp(-r * T);
+        double meanPair  = totals[0] / pairs;
+        double variance  = (totals[1] / pairs) - meanPair * meanPair;
+        if(variance < 0) variance = 0;
+        double price     = discount * meanPair;
+        double stdError  = discount * Math.sqrt(variance / pairs);
+        return new PricingResult(price, stdError, pairs * 2);
     }
 
 
-    private static double runBatch(PathDependentOption option, SimulationContext ctx,
-                                   double spot, double logSpot, double drift, double sqrtDt, int tS,
-                                   double v0, double kappa, double theta, double xi,
-                                   double rho, double sqrt1mRho2,
-                                   double[] stepDivs, boolean hasDiscreteDivs,
-                                   int pairStart, int pairCount, boolean seeded, long seed) {
+    private static double[] runBatch(PathDependentOption option, SimulationContext ctx,
+                                     double spot, double logSpot, double drift, double sqrtDt, int tS,
+                                     double v0, double kappa, double theta, double xi,
+                                     double rho, double sqrt1mRho2,
+                                     double[] stepDivs, boolean hasDiscreteDivs,
+                                     int pairStart, int pairCount, boolean seeded, long seed) {
 
         final PathAccumulator accPos = option.newAccumulator(ctx);
         final PathAccumulator accNeg = option.newAccumulator(ctx);
         final double dt = ctx.dt;
         final ThreadLocalRandom tlr = seeded ? null : ThreadLocalRandom.current();
 
-        double sum = 0.0;
+        double sum   = 0.0;
+        double sumSq = 0.0;
         for(int p = 0; p < pairCount; p++) {
             accPos.reset();
             accNeg.reset();
@@ -195,9 +204,11 @@ public final class HestonMonteCarloEngine {
                 accNeg.accumulate(priceNeg, logNeg);
             }
 
-            sum += accPos.payoff() + accNeg.payoff();
+            double pairPayoff = 0.5 * (accPos.payoff() + accNeg.payoff());
+            sum   += pairPayoff;
+            sumSq += pairPayoff * pairPayoff;
         }
-        return sum;
+        return new double[]{sum, sumSq};
     }
 
 

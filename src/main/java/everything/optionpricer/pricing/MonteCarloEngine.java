@@ -99,38 +99,56 @@ public final class MonteCarloEngine {
         final int batchSize   = (pairs + parallelism - 1) / parallelism;
         final boolean seeded = (seed != null);
         final long seedVal = seeded ? seed : 0L;
-        final DividendSchedule divsFinal = dividends; // unused inside lambda but kept for clarity
+        // Capture the deadline once on the request thread so we can hand it
+        // to the parallel FJP workers (which don't inherit ThreadLocals).
+        final long deadlineNs = Deadline.peekNs();
 
-        double sum = IntStream.range(0, parallelism).parallel().mapToDouble(t -> {
-            int start = t * batchSize;
-            int end   = Math.min(pairs, start + batchSize);
-            if(start >= end) return 0.0;
-            return seeded
-                    ? runBatchSeeded(option, ctx, spot, logSpot, drift, diff, tS,
-                                     stepDivs, hasDiscreteDivs, start, end - start, seedVal)
-                    : runBatch(option, ctx, spot, logSpot, drift, diff, tS,
-                               stepDivs, hasDiscreteDivs, end - start);
-        }).sum();
+        // Each batch returns {sumPairPayoff, sumPairPayoffSquared}.
+        double[] totals = IntStream.range(0, parallelism).parallel()
+                .mapToObj(t -> {
+                    int start = t * batchSize;
+                    int end   = Math.min(pairs, start + batchSize);
+                    if(start >= end) return new double[]{0.0, 0.0};
+                    return seeded
+                            ? runBatchSeeded(option, ctx, spot, logSpot, drift, diff, tS,
+                                             stepDivs, hasDiscreteDivs, start, end - start, seedVal, deadlineNs)
+                            : runBatch(option, ctx, spot, logSpot, drift, diff, tS,
+                                       stepDivs, hasDiscreteDivs, end - start, deadlineNs);
+                })
+                .reduce(new double[]{0.0, 0.0},
+                        (a, b) -> new double[]{a[0] + b[0], a[1] + b[1]});
 
-        double averagePayoff = sum / (2.0 * pairs);
-        return new PricingResult(Math.exp(-riskFreeRate * T) * averagePayoff);
+        double discount = Math.exp(-riskFreeRate * T);
+        // Treat each antithetic pair as a single sample. Pair payoff = (pos+neg)/2,
+        // so we tracked sum & sumSq of pair payoffs in runBatch.
+        double meanPair  = totals[0] / pairs;
+        double variance  = (totals[1] / pairs) - meanPair * meanPair;
+        if(variance < 0) variance = 0;                     // floor floating-point noise
+        double price    = discount * meanPair;
+        double stdError = discount * Math.sqrt(variance / pairs);
+        return new PricingResult(price, stdError, pairs * 2);
     }
 
 
-    private static double runBatch(PathDependentOption option, SimulationContext ctx,
-                                   double spot, double logSpot,
-                                   double drift, double diff, int tS,
-                                   double[] stepDivs, boolean hasDiscreteDivs,
-                                   int pairCount) {
+    private static double[] runBatch(PathDependentOption option, SimulationContext ctx,
+                                     double spot, double logSpot,
+                                     double drift, double diff, int tS,
+                                     double[] stepDivs, boolean hasDiscreteDivs,
+                                     int pairCount, long deadlineNs) {
 
         final PathAccumulator accPos = option.newAccumulator(ctx);
         final PathAccumulator accNeg = option.newAccumulator(ctx);
         final boolean needsPrice = accPos.needsPrice();
         final ThreadLocalRandom rng = ThreadLocalRandom.current();
 
-        double sum = 0.0;
+        double sum   = 0.0;
+        double sumSq = 0.0;
 
         for(int p = 0; p < pairCount; p++) {
+            // Cooperative cancellation. Check every 64 pairs so the
+            // check itself doesn't measurably slow down hot loops.
+            if((p & 0x3f) == 0) Deadline.checkpointAt(deadlineNs);
+
             accPos.reset();
             accNeg.reset();
             accPos.accumulate(spot, logSpot);
@@ -165,26 +183,31 @@ public final class MonteCarloEngine {
                 accNeg.accumulate(priceNeg, logNeg);
             }
 
-            sum += accPos.payoff() + accNeg.payoff();
+            double pairPayoff = 0.5 * (accPos.payoff() + accNeg.payoff());
+            sum   += pairPayoff;
+            sumSq += pairPayoff * pairPayoff;
         }
 
-        return sum;
+        return new double[]{sum, sumSq};
     }
 
 
-    private static double runBatchSeeded(PathDependentOption option, SimulationContext ctx,
-                                         double spot, double logSpot,
-                                         double drift, double diff, int tS,
-                                         double[] stepDivs, boolean hasDiscreteDivs,
-                                         int pairStart, int pairCount, long seed) {
+    private static double[] runBatchSeeded(PathDependentOption option, SimulationContext ctx,
+                                           double spot, double logSpot,
+                                           double drift, double diff, int tS,
+                                           double[] stepDivs, boolean hasDiscreteDivs,
+                                           int pairStart, int pairCount, long seed,
+                                           long deadlineNs) {
 
         final PathAccumulator accPos = option.newAccumulator(ctx);
         final PathAccumulator accNeg = option.newAccumulator(ctx);
         final boolean needsPrice = accPos.needsPrice();
 
-        double sum = 0.0;
+        double sum   = 0.0;
+        double sumSq = 0.0;
 
         for(int p = 0; p < pairCount; p++) {
+            if((p & 0x3f) == 0) Deadline.checkpointAt(deadlineNs);
             SplittableRandom rng = new SplittableRandom(mixSeed(seed, pairStart + p));
 
             accPos.reset();
@@ -220,10 +243,12 @@ public final class MonteCarloEngine {
                 accNeg.accumulate(priceNeg, logNeg);
             }
 
-            sum += accPos.payoff() + accNeg.payoff();
+            double pairPayoff = 0.5 * (accPos.payoff() + accNeg.payoff());
+            sum   += pairPayoff;
+            sumSq += pairPayoff * pairPayoff;
         }
 
-        return sum;
+        return new double[]{sum, sumSq};
     }
 
 
